@@ -44,11 +44,15 @@ export PS5_CLANG=${PS5_CLANG:-$(command -v clang-19 || command -v clang)}
 source "$tri/tools/radv-link.sh"
 radv_link_recipe "$stage" "$sdk_root" "$radv_archive"
 
+# stat("") / lstat("") as on Linux (ps5_stat.c, through --wrap).
+"$sdk_root/bin/prospero-clang" -c -O2 -fno-visibility-from-dllstorageclass -o "$stage/build/ps5_stat.o" "$ps5dir/tools/ps5_stat.c"
+
 echo "==> [link] Skate 3 + RADV into a PS5 PIE ELF"
 "$sdk_root/bin/prospero-lld" "${radv_linker_script[@]}" --eh-frame-hdr "${radv_link_flags[@]}" \
     --version-script "$tri/tooling/native/app-symbols.map" --exclude-libs=ALL \
+    --wrap=stat --wrap=lstat \
     -e _start -o "$stage/build/llvm-pie.elf" \
-    "$tri/build/obj/app_crt.o" "$tri/build/obj/app_cpp_runtime.o" \
+    "$tri/build/obj/app_crt.o" "$tri/build/obj/app_cpp_runtime.o" "$stage/build/ps5_stat.o" \
     --start-group "${inputs[@]}" --end-group \
     "$tri/build/stubs/libSceAgc.so" "$tri/build/stubs/libSceAgcDriver.so" \
     "${radv_link_inputs[@]}" \

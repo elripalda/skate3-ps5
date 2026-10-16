@@ -651,8 +651,10 @@ std::optional<rex::PathConfig> Skate3BaseApp::OnFinalizePaths(
     ApplyDemoPathProfileOverride();
   }
 
-  const bool has_config_file = std::filesystem::exists(defaults.config_path);
-  const bool has_game_path = std::filesystem::is_directory(defaults.game_data_root);
+  std::error_code fs_ec;  // (paths may be empty: no throwing on the PS5's EINVAL)
+  const bool has_config_file = !defaults.config_path.empty() && std::filesystem::exists(defaults.config_path, fs_ec);
+  const bool has_game_path =
+      !defaults.game_data_root.empty() && std::filesystem::is_directory(defaults.game_data_root, fs_ec);
   if (!has_profiles_file && has_config_file && has_game_path) {
     skate3::SaveProfiles(profiles_path_, profiles);
   }
