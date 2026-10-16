@@ -6646,7 +6646,7 @@ index 5a0f46f..7520c88 100644
  
  void SDLWindow::RequestPaintImpl() {
 diff --git a/src/ui/windowed_app_main_sdl.cpp b/src/ui/windowed_app_main_sdl.cpp
-index a8bfad9..c8da109 100644
+index a8bfad9..b9207a1 100644
 --- a/src/ui/windowed_app_main_sdl.cpp
 +++ b/src/ui/windowed_app_main_sdl.cpp
 @@ -14,7 +14,13 @@
@@ -6692,7 +6692,7 @@ index a8bfad9..c8da109 100644
      // Skip app/runtime teardown entirely: guest threads cannot be reliably
      // stopped on Darwin (pthread_cancel only lands at cancellation points,
      // never in CPU-bound recompiled code), so the destructor chain races
-@@ -65,3 +80,172 @@ int main(int argc, char** argv) {
+@@ -65,3 +80,184 @@ int main(int argc, char** argv) {
    SDL_Quit();
    return result;
  }
@@ -6703,6 +6703,7 @@ index a8bfad9..c8da109 100644
 +// process starts elsewhere, often read-only), and show a notification so the
 +// player can tell the app started at all.
 +#include <cstring>
++#include <sys/stat.h>
 +#include <unistd.h>
 +extern "C" int sceKernelSendNotificationRequest(int, void*, size_t, int);
 +extern "C" int sceSystemServiceLoadExec(const char* path, char* const argv[]);
@@ -6722,6 +6723,12 @@ index a8bfad9..c8da109 100644
 +  char text[600];
 +  std::snprintf(text, sizeof(text), "%s: %s", what, SDL_GetError());
 +  Ps5Notify(text);
++  // (the log file doesn't exist yet: the reason in logs/startup_error.log)
++  mkdir("/app0/logs", 0777);
++  if (FILE* f = std::fopen("/app0/logs/startup_error.log", "w")) {
++    std::fprintf(f, "%s\n", text);
++    std::fclose(f);
++  }
 +}
 +}  // namespace
 +
@@ -6854,8 +6861,13 @@ index a8bfad9..c8da109 100644
 +  std::set_terminate(Ps5Terminate);
 +  std::thread(Ps5DiagMonitor).detach();
 +  int result = RunWindowedApp(argc, argv);
-+  if (result != 0) Ps5Notify("Stopped with an error - see /app0/logs");
-+  return result;
++  if (result != 0) {
++    Ps5Notify("Stopped with an error - see /app0/logs");
++    sleep(2);  // (let the notification show)
++  }
++  // Leave without the C runtime's exit handlers (with the game's threads
++  // still around, they end in a crash report).
++  _exit(result);
 +}
 +
 +#else
@@ -6865,6 +6877,28 @@ index a8bfad9..c8da109 100644
 +}
 +
 +#endif
+diff --git a/thirdparty/CMakeLists.txt b/thirdparty/CMakeLists.txt
+index f076b0d..e75286d 100644
+--- a/thirdparty/CMakeLists.txt
++++ b/thirdparty/CMakeLists.txt
+@@ -280,7 +280,7 @@ set(SDL_TEST OFF CACHE BOOL "" FORCE)
+ set(SDL_UNIX_CONSOLE_BUILD ON CACHE BOOL "" FORCE)
+ 
+ # Disable unused subsystems
+-if(APPLE)
++if(APPLE OR PS5)  # [ps5 port] SDL's dummy video driver runs the windows and events
+     set(SDL_VIDEO ON CACHE BOOL "" FORCE)
+ else()
+     set(SDL_VIDEO OFF CACHE BOOL "" FORCE)
+@@ -313,7 +313,7 @@ set(SDL_DUMMYAUDIO OFF CACHE BOOL "" FORCE)
+ set(SDL_DUMMYVIDEO OFF CACHE BOOL "" FORCE)
+ 
+ # Linux audio backends
+-if(UNIX AND NOT APPLE)
++if(UNIX AND NOT APPLE AND NOT PS5)
+     set(SDL_ALSA              ON  CACHE BOOL "" FORCE)
+     set(SDL_ALSA_SHARED       ON  CACHE BOOL "" FORCE)
+     set(SDL_PULSEAUDIO        ON  CACHE BOOL "" FORCE)
 diff --git a/thirdparty/crypto/sha256.cpp b/thirdparty/crypto/sha256.cpp
 index 0ecbf41..a7e37ca 100644
 --- a/thirdparty/crypto/sha256.cpp
