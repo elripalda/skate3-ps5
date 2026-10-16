@@ -33,6 +33,12 @@ The easiest way to play is **[Recomp Store](https://recompstore.com)**. It insta
 
 Launch it from your homebrew launcher. The hub opens first: press START GAME.
 
+## Updating
+Copy the new `eboot.bin` (and `hub` folder) over the old ones. Your game files in `Assets` and your settings and saves in `UserData` stay as they are. What changed: [CHANGELOG](ps5/CHANGELOG.md).
+
+## Source
+The full source is in this repository: Skate 3 Recomp with the PS5 port on top. To build it yourself (Linux, and your own copy of the game), see [ps5/BUILD.md](ps5/BUILD.md).
+
 ## Credits
 - **[mchughalex](https://github.com/mchughalex)**: [Skate 3 Recomp](https://github.com/mchughalex/skate3recomp), the recompilation and native renderer this port is built on
 - **[elripalda](https://github.com/elripalda)**: the PS5 port, the hub and the PlayStation buttons

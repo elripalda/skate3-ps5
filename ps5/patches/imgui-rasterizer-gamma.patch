@@ -1,0 +1,56 @@
+diff --git a/imgui.h b/imgui.h
+index be945c611..41ee74d6c 100644
+--- a/imgui.h
++++ b/imgui.h
+@@ -3539,6 +3539,7 @@ struct ImFontConfig
+     unsigned int    FontLoaderFlags;        // 0        // Settings for custom font builder. THIS IS BUILDER IMPLEMENTATION DEPENDENT. Leave as zero if unsure.
+     //unsigned int  FontBuilderFlags;       // --       // [Renamed in 1.92] Ue FontLoaderFlags.
+     float           RasterizerMultiply;     // 1.0f     // Linearly brighten (>1.0f) or darken (<1.0f) font output. Brightening small fonts may be a good workaround to make them more readable. This is a silly thing we may remove in the future.
++    float           RasterizerGamma;        // 1.0f     // Gamma applied to glyph coverage (<1.0f: bolder, >1.0f: thinner). [skate3 port: pinned rexglue-skate3 imgui had this]
+     float           RasterizerDensity;      // 1.0f     // [LEGACY: this only makes sense when ImGuiBackendFlags_RendererHasTextures is not supported] DPI scale multiplier for rasterization. Not altering other font metrics: makes it easy to swap between e.g. a 100% and a 400% fonts for a zooming display, or handle Retina screen. IMPORTANT: If you change this it is expected that you increase/decrease font scale roughly to the inverse of this, otherwise quality may look lowered.
+ 
+     // [Internal]
+diff --git a/imgui_draw.cpp b/imgui_draw.cpp
+index de6462295..40e5dba09 100644
+--- a/imgui_draw.cpp
++++ b/imgui_draw.cpp
+@@ -2417,6 +2417,7 @@ ImFontConfig::ImFontConfig()
+     OversampleV = 0; // Auto == 1
+     GlyphMaxAdvanceX = FLT_MAX;
+     RasterizerMultiply = 1.0f;
++    RasterizerGamma = 1.0f;
+     RasterizerDensity = 1.0f;
+     EllipsisChar = 0;
+ }
+@@ -2883,6 +2884,31 @@ void ImFontAtlasTextureBlockPostProcess(ImFontAtlasPostProcessData* data)
+     // Multiply operator (legacy)
+     if (data->FontSrc->RasterizerMultiply != 1.0f)
+         ImFontAtlasTextureBlockPostProcessMultiply(data, data->FontSrc->RasterizerMultiply);
++    // Gamma on the coverage
++    if (data->FontSrc->RasterizerGamma != 1.0f && data->FontSrc->RasterizerGamma > 0.0f)
++    {
++        unsigned char lut[256];
++        for (int i = 0; i < 256; i++)
++            lut[i] = (unsigned char)ImClamp((int)(ImPow(i / 255.0f, data->FontSrc->RasterizerGamma) * 255.0f + 0.5f), 0, 255);
++        unsigned char* pixels = (unsigned char*)data->Pixels;
++        for (int ny = data->Height; ny > 0; ny--, pixels += data->Pitch)
++        {
++            if (data->Format == ImTextureFormat_Alpha8)
++            {
++                for (int nx = 0; nx < data->Width; nx++)
++                    pixels[nx] = lut[pixels[nx]];
++            }
++            else if (data->Format == ImTextureFormat_RGBA32)
++            {
++                ImU32* p = (ImU32*)(void*)pixels;
++                for (int nx = 0; nx < data->Width; nx++, p++)
++                {
++                    unsigned int a = lut[(*p >> IM_COL32_A_SHIFT) & 0xFF];
++                    *p = (*p & ~IM_COL32_A_MASK) | (a << IM_COL32_A_SHIFT);
++                }
++            }
++        }
++    }
+ }
+ 
+ void ImFontAtlasTextureBlockPostProcessMultiply(ImFontAtlasPostProcessData* data, float multiply_factor)
