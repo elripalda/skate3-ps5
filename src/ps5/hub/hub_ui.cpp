@@ -33,47 +33,80 @@ static const std::vector<Hub::Setting>& Settings() {
        "faster. Emulated replays the Xbox 360's graphics exactly, as a fallback if something looks wrong.",
        {"true", "false"}, {"Native", "Emulated"}, "true"},
       {"DISPLAY", {"resolution_scale", "draw_resolution_scale_x", "draw_resolution_scale_y"}, "Resolution",
-       "How sharp the game is drawn. 2160p matches what the PS5 sends to a 4K TV; 1440p leaves more room for the "
-       "effects below.",
-       {"1", "2", "3"}, {"720p (1x)", "1440p (2x)", "2160p (3x)"}, "2"},
+       "How sharp the game is drawn. 720p is how the Xbox 360 drew it; 1440p and 4K draw every frame at two and "
+       "three times that, for a far cleaner picture. The picture always goes to the TV in 4K. 4K asks the most of "
+       "the PS5: if the game can't keep up, step down to 1440p.",
+       {"1", "2", "3"}, {"720p (Original)", "1440p", "4K"}, "2"},
       {"DISPLAY", {"skate3_guest_fps_cap"}, "Frame Rate",
-       "60 fps is smoother. The game runs at the same speed either way.", {"60", "30"}, {"60 fps", "30 fps"}, "60"},
-      {"DISPLAY", {"skate3_native_render_scene_msaa"}, "Anti-Aliasing", "Smooths jagged edges (Native renderer).",
-       {"1", "2", "4", "8"}, {"Off (1x)", "2x", "4x", "8x"}, "4"},
-      {"DISPLAY", {"show_fps_counter"}, "FPS Counter", "Shows the frame rate in a corner of the screen.",
+       "How many pictures a second the game draws. The Xbox 360 game ran at 30; this version runs at 60. 30 leaves "
+       "the PS5 twice the time for each picture, for the highest settings.",
+       {"60", "30"}, {"60 FPS", "30 FPS"}, "60"},
+      {"DISPLAY", {"skate3_native_render_scene_msaa"}, "Anti-Aliasing",
+       "Smooths jagged edges, and the shimmer of thin things far away (railings, wires, fences). Each step up costs "
+       "more. Native renderer only.",
+       {"1", "2", "4", "8"}, {"Off", "2x", "4x", "8x"}, "4"},
+      {"DISPLAY", {"show_fps_counter"}, "FPS Counter", "Shows the frame rate in the corner of the screen.",
        {"false", "true"}, {"Off", "On"}, "false"},
       {"GRAPHICS", {"skate3_native_render_scene_shadows"}, "Shadows",
-       "Shadows from the skaters, people and props onto the world (Native renderer).", {"true", "false"},
-       {"On", "Off"}, "true"},
-      {"GRAPHICS", {"skate3_native_render_scene_shadow_static_size"}, "Shadow Quality",
-       "How sharp the shadows of buildings, trees and rails are. Higher costs more of the graphics chip.",
-       {"2048", "4096"}, {"Medium", "High"}, "4096"},
+       "Shadows of the skaters, people and props, as the game draws them.", {"true", "false"}, {"On", "Off"},
+       "true"},
+      {"GRAPHICS", {"skate3_native_render_scene_shadow_tile"}, "Shadow Quality",
+       "How sharp the shadows of the skaters and props are. Auto follows the resolution; 512 is the original "
+       "game's.",
+       {"0", "512", "1024", "1536", "2048"}, {"Auto", "512 (Original)", "1024", "1536", "2048"}, "0"},
+      {"GRAPHICS", {"skate3_native_render_scene_shadow_static_casters"}, "Enhanced Shadows",
+       "Real-time sun shadows from buildings, trees and props, which the original game only painted into the "
+       "world. They also shade the sun shafts.",
+       {"true", "false"}, {"On", "Off"}, "true"},
+      {"GRAPHICS", {"skate3_native_render_scene_shadow_static_size"}, "Enhanced Shadow Detail",
+       "How sharp the enhanced shadows are far away. Higher uses more memory (about 50 MB at 2048, 200 MB at 4096, "
+       "800 MB at 8192).",
+       {"2048", "4096", "8192"}, {"2048", "4096", "8192"}, "4096"},
+      {"GRAPHICS", {"skate3_native_render_scene_shadow_pcss"}, "Soft Shadows",
+       "Shadows sharp where they meet what casts them and softer further away, as the sun makes them (PCSS). The "
+       "most demanding of the shadow settings at high resolutions.",
+       {"true", "false"}, {"On", "Off"}, "true"},
       {"GRAPHICS", {"skate3_native_render_scene_ssao"}, "Ambient Occlusion",
-       "Soft contact shadows in corners and under ledges.", {"true", "false"}, {"On", "Off"}, "true"},
-      {"GRAPHICS", {"skate3_native_render_scene_bloom"}, "Bloom", "A glow around bright lights and the sky.",
+       "Soft shading where surfaces meet: under ledges, rails, cars and the skater (GTAO).", {"true", "false"},
+       {"On", "Off"}, "true"},
+      {"GRAPHICS", {"skate3_native_render_scene_bloom"}, "Bloom",
+       "A glow around bright lights (lamps, neon, the sun), from how bright they really are. Most visible at "
+       "night.",
        {"true", "false"}, {"On", "Off"}, "true"},
       {"GRAPHICS", {"skate3_native_render_scene_shafts", "skate3_native_render_scene_haze"}, "Volumetric Lighting",
-       "Sun shafts and haze in the air.", {"true", "false"}, {"On", "Off"}, "true"},
+       "Shafts of sunlight through buildings and trees, and haze in the air, both following the time of day.",
+       {"true", "false"}, {"On", "Off"}, "true"},
       {"GRAPHICS", {"skate3_draw_distance_scale", "skate3_lod_distance_scale"}, "Draw Distance",
-       "How far away things are drawn, and drawn in full detail.", {"1.0", "2.0", "3.0"},
-       {"Original", "2x", "3x"}, "2.0"},
-      {"GRAPHICS", {"skate3_field_of_view"}, "Field of View", "How wide the camera sees. 60 is the game's own.",
+       "How far away small objects, plants and the skaters' detail stay in view, as a multiple of the original "
+       "game's distances. Higher draws more of Port Carverton, and costs some speed.",
+       {"1.0", "2.0", "3.0"}, {"Original", "2x", "3x"}, "2.0"},
+      {"GRAPHICS", {"skate3_draw_distance_stream_probe"}, "World Streaming",
+       "Loads the parts of the city around you before they come into view, so buildings and trees appear far away "
+       "instead of close by. Uses a little more memory. Original is how the game did it.",
+       {"0", "100", "200", "300"}, {"Original", "Near (100 m)", "Extended (200 m)", "Far (300 m)"}, "0"},
+      {"GRAPHICS", {"skate3_field_of_view"}, "Field of View",
+       "How wide the camera sees, in degrees. The game's own is 60.",
        {"60.0", "65.0", "70.0", "75.0", "80.0", "85.0", "90.0"}, {"60", "65", "70", "75", "80", "85", "90"},
        "60.0"},
       {"GAME", {"skate3_button_prompts"}, "Button Prompts",
-       "The buttons the game shows: the PlayStation's, or the Xbox 360's own.", {"playstation", "xbox"},
-       {"PlayStation", "Xbox"}, "playstation"},
-      {"GAME", {"user_language"}, "Language", "Menus, text and speech, where the game has them.",
+       "The buttons the game shows in its prompts and tutorials: PlayStation's, or the Xbox 360's it was made "
+       "with.",
+       {"playstation", "xbox"}, {"PlayStation", "Xbox"}, "playstation"},
+      {"GAME", {"user_language"}, "Language", "The language of the game's text and menus.",
        {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"},
        {"English", "Japanese", "German", "French", "Spanish", "Italian", "Korean", "Traditional Chinese",
         "Portuguese", "Simplified Chinese", "Polish", "Russian"},
        "1"},
-      {"GAME", {"skate3_intro_movie_skip"}, "Skip Intro Movie", "Go straight to the game's menus.",
-       {"true", "false"}, {"On", "Off"}, "true"},
+      {"GAME", {"skate3_intro_movie_skip"}, "Skip Intro Movie",
+       "Lets Cross or OPTIONS skip the movie the game opens with.", {"true", "false"}, {"On", "Off"}, "true"},
       {"HUB", {"hub_music_volume"}, "Menu Music",
-       "How loud the music behind the hub is (songs in hub/music). R3 plays the next song.",
+       "The volume of the music here (the songs in the hub's music folder). R3 plays the next song.",
        {"0", "10", "20", "30", "40", "50", "60", "70", "80", "90", "100"},
        {"Off", "10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%"}, "80"},
+      {"HUB", {}, "Reset to Defaults",
+       "Every setting goes back to how the port comes: the native renderer at 1440p and 60 FPS with all its "
+       "graphics options, PlayStation buttons, English, the menu music at 80%. Your saves aren't touched.",
+       {}, {}, ""},
   };
   return rows;
 }
@@ -101,10 +134,12 @@ void Hub::Init(const Assets& assets, const GameState& game, Config config, std::
 }
 
 std::string Hub::Value(const Setting& s) const {
+  if (s.keys.empty()) return std::string();
   return config_.get ? config_.get(s.keys[0]) : std::string(s.fallback);
 }
 
 int Hub::SettingIndex(const Setting& r) const {
+  if (r.values.empty()) return 0;
   const std::string v = Normal(Value(r));
   for (size_t k = 0; k < r.values.size(); ++k)
     if (v == Normal(r.values[k])) return int(k);
@@ -401,7 +436,12 @@ void Hub::DrawHints() {
     if (tab_ != kHome) r = Hint(r, kCircle, "Home");
     switch (tab_) {
       case kHome: r = Hint(r, kCross, "Start Game"); break;
-      case kSettingsTab: r = Hint(r, kLeft | kRight, "Change"); break;
+      case kSettingsTab: {
+        const auto& set = Settings();
+        const int sel = std::clamp(item_[tab_], 0, int(set.size()) - 1);
+        r = set[size_t(sel)].values.empty() ? Hint(r, kCross, "Reset") : Hint(r, kLeft | kRight, "Change");
+        break;
+      }
     }
   }
   if (toast_time_ > 0) {
@@ -497,6 +537,7 @@ void Hub::DrawHome() {
        game_.title_update ? "Title Update 3" : "Title Update 3 (set up on START GAME)", "Title Update 3 missing"},
   };
   float cy = 870;
+  Text(a_.body_bold, 15, 1460, cy - 44, White(0.45f), "YOUR GAME", 0, 3);
   for (const Check& c : checks) {
     if (c.ok) dl_->AddCircleFilled(P(1460, cy + 14), 6 * s_, kAccent, 20);
     else dl_->AddCircle(P(1460, cy + 14), 6 * s_, White(0.5f), 20, 2 * s_);
@@ -510,7 +551,7 @@ void Hub::DrawHome() {
 }
 
 void Hub::DrawSettings() {
-  PageTitle("SETTINGS", "Saved as you change them. They take effect when the game starts.");
+  PageTitle("SETTINGS", "Saved as you change them. Most can be changed in the game too.");
   const auto& set = Settings();
   const int sel = std::clamp(item_[tab_], 0, int(set.size()) - 1);
   std::vector<Row> rows;
@@ -523,6 +564,10 @@ void Hub::DrawSettings() {
   List(rows, sel, 54, [&](int i, float yy, float over) {
     const auto& r = set[size_t(i)];
     Text(a_.body_bold, 23, x + 24, yy + 11, Mix(White(0.92f), kInk, over), r.label);
+    if (r.values.empty()) {  // an action (Reset to Defaults): Cross does it
+      if (i == sel) Glyph(kCross, x + w - 46, yy + 24, Mix(White(0.9f), kInk, over));
+      return;
+    }
     const std::string v = r.labels[size_t(SettingIndex(r))];
     if (std::strcmp(r.keys[0], "hub_music_volume") == 0) {
       // a slider: the bar fills to the volume, the value beside it
@@ -564,8 +609,9 @@ void Hub::DrawSettings() {
     py += 72;
     py += Wrapped(a_.body, 23, px, py, pw, White(0.68f), r.help);
     py += 34;
+    if (r.values.empty()) return;
     const int cur = SettingIndex(r);
-    if (std::strcmp(r.keys[0], "hub_music_volume") == 0) {
+    if (!r.keys.empty() && std::strcmp(r.keys[0], "hub_music_volume") == 0) {
       const float shown = knobs_[kSettingsTab << 16 | (0x8000 + sel)];
       Text(a_.display, 64, px, py, kText, r.labels[size_t(cur)]);
       py += 110;
@@ -601,10 +647,12 @@ void Hub::DrawAbout() {
     const char* what;
   };
   const Credit people[] = {
-      {"mchughalex", "Created Skate 3 Recomp, the native PC recompilation and renderer this port is built on."},
+      {"mchughalex",
+       "Made Skate 3 Recomp, the native PC recompilation of Skate 3, with its native renderer, enhanced graphics "
+       "and settings. This PlayStation 5 version is built on his work."},
       {"@elripalda", "Brought it to PlayStation 5: the PS5 port and this hub."},
       {"ReXGlue", "The static recompiler and runtime that turn the Xbox 360 game into a native program."},
-      {"Xenia", "The Xbox 360 emulator the runtime's code comes from."},
+      {"Xenia", "The Xbox 360 emulator whose research the runtime builds on."},
   };
   float y = 276;
   for (const Credit& c : people) {
@@ -642,6 +690,14 @@ int Hub::Items() const {
 void Hub::Activate(int dir) {
   if (tab_ != kSettingsTab) return;
   const auto& r = Settings()[size_t(item_[tab_])];
+  if (r.values.empty()) {  // Reset to Defaults (Cross only)
+    if (dir != 1) return;
+    if (config_.reset) config_.reset();
+    if (audio_.music_volume) audio_.music_volume(MusicVolume());
+    Toast("Settings reset to defaults");
+    Play(Sound::kSelect);
+    return;
+  }
   const int n = int(r.values.size());
   const bool slider = std::strcmp(r.keys[0], "hub_music_volume") == 0;
   int idx = (SettingIndex(r) + dir + n) % n;
@@ -711,8 +767,9 @@ void Hub::Navigate(const Pad& pad) {
   if (p & kDown) sel = (sel + 1) % n;
   if (sel != before) Play(Sound::kMove);
   if (tab_ == kSettingsTab) {
-    if (p & kLeft) Activate(-1);
-    if (p & (kRight | kCross)) Activate(1);
+    const bool action = Settings()[size_t(sel)].values.empty();
+    if ((p & kLeft) && !action) Activate(-1);
+    if ((p & kCross) || ((p & kRight) && !action)) Activate(1);
     if (p & (kLeft | kRight | kCross)) press_ = 0.6f;
   }
 }

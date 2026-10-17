@@ -439,6 +439,8 @@ void ApplyFirstRunPs5Defaults() {
       {"skate3_native_render_scene_shadow_pcss", "true"},
       {"skate3_native_render_scene_shadow_static_casters", "true"},
       {"skate3_native_render_scene_shadow_static_size", "4096"},
+      {"skate3_native_render_scene_shadow_tile", "0"},
+      {"skate3_draw_distance_stream_probe", "0"},
       {"skate3_native_render_scene_ssao", "true"},
       {"skate3_native_render_scene_bloom", "true"},
       {"skate3_native_render_scene_shafts", "true"},
@@ -685,6 +687,10 @@ std::optional<rex::PathConfig> Skate3BaseApp::OnFinalizePaths(
         REXLOG_WARN("PS5 hub: can't set {} to {}", name, value);
         return;
       }
+      rex::ui::SaveSimpleSettingsConfig(settings_path);
+    };
+    config.reset = [settings_path]() {
+      ApplyFirstRunPs5Defaults();
       rex::ui::SaveSimpleSettingsConfig(settings_path);
     };
     // (the settings file exists from now on: the first run's defaults stay)

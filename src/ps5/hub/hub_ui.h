@@ -78,6 +78,7 @@ struct Audio {
 struct Config {
   std::function<std::string(const std::string&)> get;
   std::function<void(const std::string&, const std::string&)> set;  // (saved at once)
+  std::function<void()> reset;  // every setting back to the port's defaults (saved)
 };
 
 // The pages, in the order of the top bar.

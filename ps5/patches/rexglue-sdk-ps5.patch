@@ -5048,7 +5048,7 @@ index caa3538..1122541 100644
    auto result = is->GetKeystroke(user_index, flags, keystroke);
    if (XSUCCEEDED(result)) {
 diff --git a/src/kernel/xam/xam_ui.cpp b/src/kernel/xam/xam_ui.cpp
-index f08e31e..1053b03 100644
+index f08e31e..5eaf722 100644
 --- a/src/kernel/xam/xam_ui.cpp
 +++ b/src/kernel/xam/xam_ui.cpp
 @@ -29,6 +29,13 @@ REXCVAR_DEFINE_BOOL(headless, false, "Kernel",
@@ -5065,7 +5065,7 @@ index f08e31e..1053b03 100644
  
  namespace rex {
  namespace kernel {
-@@ -209,6 +216,374 @@ u32 XamIsUIActive_entry() {
+@@ -209,6 +216,376 @@ u32 XamIsUIActive_entry() {
    return xeXamIsUIActive();
  }
  
@@ -5083,10 +5083,12 @@ index f08e31e..1053b03 100644
 +    using clock = std::chrono::steady_clock;
 +    uint16_t now = 0;
 +    auto* is = static_cast<InputSystem*>(REX_KERNEL_STATE()->emulator()->input_system());
-+    X_INPUT_STATE st{};
-+    if (is && is->GetState(0, &st) == X_ERROR_SUCCESS) {
-+      now = st.gamepad.buttons;
-+      const int lx = st.gamepad.thumb_lx, ly = st.gamepad.thumb_ly;
++    // The UI path: the game's own input is switched off while a system
++    // dialog is open (its active callback), the dialog's isn't.
++    X_INPUT_GAMEPAD gp{};
++    if (is && is->GetUiGamepadState(&gp)) {
++      now = gp.buttons;
++      const int lx = gp.thumb_lx, ly = gp.thumb_ly;
 +      if (lx < -16000) now |= X_INPUT_GAMEPAD_DPAD_LEFT;
 +      if (lx > 16000) now |= X_INPUT_GAMEPAD_DPAD_RIGHT;
 +      if (ly > 16000) now |= X_INPUT_GAMEPAD_DPAD_UP;
@@ -5440,7 +5442,7 @@ index f08e31e..1053b03 100644
  class MessageBoxDialog : public XamDialog {
   public:
    MessageBoxDialog(rex::ui::ImGuiDrawer* imgui_drawer, std::string title, std::string description,
-@@ -240,6 +615,31 @@ class MessageBoxDialog : public XamDialog {
+@@ -240,6 +617,31 @@ class MessageBoxDialog : public XamDialog {
        if (first_draw) {
          ImGui::SetKeyboardFocusHere();
        }
@@ -5472,7 +5474,7 @@ index f08e31e..1053b03 100644
        for (size_t i = 0; i < buttons_.size(); ++i) {
          if (ImGui::Button(buttons_[i].c_str())) {
            chosen_button_ = static_cast<uint32_t>(i);
-@@ -249,6 +649,7 @@ class MessageBoxDialog : public XamDialog {
+@@ -249,6 +651,7 @@ class MessageBoxDialog : public XamDialog {
          ImGui::SameLine();
        }
        ImGui::Spacing();
@@ -5480,7 +5482,7 @@ index f08e31e..1053b03 100644
        ImGui::Spacing();
        ImGui::EndPopup();
      } else {
-@@ -261,6 +662,10 @@ class MessageBoxDialog : public XamDialog {
+@@ -261,6 +664,10 @@ class MessageBoxDialog : public XamDialog {
    std::string title_;
    std::string description_;
    std::vector<std::string> buttons_;
@@ -5491,7 +5493,7 @@ index f08e31e..1053b03 100644
    uint32_t default_button_ = 0;
    uint32_t chosen_button_ = 0;
  };
-@@ -363,6 +768,19 @@ class KeyboardInputDialog : public XamDialog {
+@@ -363,6 +770,19 @@ class KeyboardInputDialog : public XamDialog {
    bool cancelled() const { return cancelled_; }
  
    void OnDraw(ImGuiIO& io) override {
@@ -5511,7 +5513,7 @@ index f08e31e..1053b03 100644
      if (!has_opened_) {
        ImGui::OpenPopup(title_.c_str());
        has_opened_ = true;
-@@ -372,6 +790,12 @@ class KeyboardInputDialog : public XamDialog {
+@@ -372,6 +792,12 @@ class KeyboardInputDialog : public XamDialog {
        if (description_.size()) {
          ImGui::TextWrapped("%s", description_.c_str());
        }
@@ -5524,7 +5526,7 @@ index f08e31e..1053b03 100644
        if (focus_request_frames_) {
          ImGui::SetKeyboardFocusHere();
        }
-@@ -421,6 +845,125 @@ class KeyboardInputDialog : public XamDialog {
+@@ -421,6 +847,125 @@ class KeyboardInputDialog : public XamDialog {
    std::vector<char> text_buffer_;
    std::string text_ = "";
    bool cancelled_ = true;
@@ -5650,7 +5652,7 @@ index f08e31e..1053b03 100644
  };
  
  // https://www.se7ensins.com/forums/threads/release-how-to-use-xshowkeyboardui-release.906568/
-@@ -701,3 +1244,17 @@ REX_EXPORT_STUB(__imp__XamShowVoiceSettingsUI);
+@@ -701,3 +1246,17 @@ REX_EXPORT_STUB(__imp__XamShowVoiceSettingsUI);
  REX_EXPORT_STUB(__imp__XamShowWhatsOnUI);
  REX_EXPORT_STUB(__imp__XamShowWordRegisterUI);
  REX_EXPORT_STUB(__imp__XamSysUiDisableAutoClose);
@@ -6298,10 +6300,24 @@ index 8b4b31d..e39d466 100644
          dwmapi
          Shcore
 diff --git a/src/ui/overlay/simple_settings_overlay.cpp b/src/ui/overlay/simple_settings_overlay.cpp
-index c22345f..b443341 100644
+index c22345f..e44d277 100644
 --- a/src/ui/overlay/simple_settings_overlay.cpp
 +++ b/src/ui/overlay/simple_settings_overlay.cpp
-@@ -245,6 +245,14 @@ std::vector<std::string_view> GetSimpleSettingsCvars() {
+@@ -124,8 +124,13 @@ constexpr std::array<const char*, 12> kLanguageLabels = {
+ // First entry matches the cvar default (the chord reset target).
+ constexpr std::array<const char*, 4> kMenuChordSpecs = {"rb+start", "lb+rb+start", "back+start",
+                                                         "l3+r3"};
++#if REX_PLATFORM_PS5  // [ps5 port] the DualSense's names
++constexpr std::array<const char*, 4> kMenuChordLabels = {"R1 + OPTIONS", "L1 + R1 + OPTIONS",
++                                                         "TOUCHPAD + OPTIONS", "L3 + R3"};
++#else
+ constexpr std::array<const char*, 4> kMenuChordLabels = {"RB + Start", "LB + RB + Start",
+                                                          "Back + Start", "L3 + R3"};
++#endif
+ 
+ constexpr std::array<const char*, 5> kMonitorLabels = {"Auto", "Monitor 1", "Monitor 2",
+                                                        "Monitor 3", "Monitor 4"};
+@@ -245,6 +250,14 @@ std::vector<std::string_view> GetSimpleSettingsCvars() {
    if (HasCvar("skate3_guest_fps_cap_auto")) {
      cvars.push_back("skate3_guest_fps_cap_auto");
    }
@@ -6594,7 +6610,7 @@ index b404ec8..ab18426 100644
        default:
          assert_unhandled_case(surface_type);
 diff --git a/src/ui/window_sdl.cpp b/src/ui/window_sdl.cpp
-index 5a0f46f..7520c88 100644
+index 5a0f46f..4f086b4 100644
 --- a/src/ui/window_sdl.cpp
 +++ b/src/ui/window_sdl.cpp
 @@ -21,6 +21,10 @@
@@ -6608,7 +6624,28 @@ index 5a0f46f..7520c88 100644
  namespace {
  
  constexpr uint32_t kDefaultDpi = 96;
-@@ -437,6 +441,7 @@ bool SDLWindow::OpenImpl() {
+@@ -424,12 +428,20 @@ bool SDLWindow::OpenImpl() {
+   if (REXCVAR_GET(sdl_high_pixel_density)) {
+     flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
+   }
++#if REX_PLATFORM_PS5
++  // [ps5 port] The window is the dummy driver's: as big as the TV picture
++  // (3840x2160), never "fullscreen" - that would take the dummy display's
++  // 1024x768 mode, and every ImGui screen (the hub, the dialogs) would be
++  // laid out 4:3 and squeezed onto the 16:9 picture.
++  window_ = SDL_CreateWindow(GetTitle().c_str(), 3840, 2160, flags & ~SDL_WINDOW_HIGH_PIXEL_DENSITY);
++#else
+   if (IsFullscreen()) {
+     flags |= SDL_WINDOW_FULLSCREEN;
+   }
+ 
+   window_ = SDL_CreateWindow(GetTitle().c_str(), int(GetDesiredLogicalWidth()),
+                              int(GetDesiredLogicalHeight()), flags);
++#endif
+   if (!window_) {
+     REXLOG_ERROR("SDLWindow: Failed to create window: {}", SDL_GetError());
+     return false;
+@@ -437,6 +449,7 @@ bool SDLWindow::OpenImpl() {
  
    WindowMap().emplace(SDL_GetWindowID(window_), this);
  
@@ -6616,7 +6653,7 @@ index 5a0f46f..7520c88 100644
    metal_view_ = SDL_Metal_CreateView(window_);
    if (!metal_view_) {
      REXLOG_ERROR("SDLWindow: Failed to create Metal view: {}", SDL_GetError());
-@@ -455,6 +460,7 @@ bool SDLWindow::OpenImpl() {
+@@ -455,6 +468,7 @@ bool SDLWindow::OpenImpl() {
      window_ = nullptr;
      return false;
    }
@@ -6624,7 +6661,17 @@ index 5a0f46f..7520c88 100644
  
    dpi_ = QueryDpi();
    SDL_ShowWindow(window_);
-@@ -541,10 +547,20 @@ void SDLWindow::FocusImpl() {
+@@ -492,6 +506,9 @@ void SDLWindow::RequestCloseImpl() {
+ }
+ 
+ void SDLWindow::ApplyNewFullscreen() {
++#if REX_PLATFORM_PS5
++  return;  // [ps5 port] (see OpenImpl: the window stays the TV picture's size)
++#endif
+   if (window_) {
+     SDL_SetWindowFullscreen(window_, IsFullscreen());
+   }
+@@ -541,10 +558,20 @@ void SDLWindow::FocusImpl() {
  }
  
  std::unique_ptr<Surface> SDLWindow::CreateSurfaceImpl(Surface::TypeFlags allowed_types) {
