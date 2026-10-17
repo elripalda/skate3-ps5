@@ -96,6 +96,21 @@ uint8_t* Guest(uint32_t physical) {
   return g_memory->TranslateVirtual<uint8_t*>(0xA0000000u | (physical & 0x1FFFFFFFu));
 }
 
+// Tells everything holding a copy of guest memory (the GPU's) that the range
+// changed and stops watching it: in each physical view, as each keeps its
+// own watches.
+void MemoryChanged(uint32_t physical, uint32_t length) {
+  physical &= 0x1FFFFFFFu;
+  g_memory->TriggerPhysicalMemoryCallbacks(rex::thread::global_critical_region::AcquireDirect(),
+                                           0xA0000000u + physical, length, true, true);
+  g_memory->TriggerPhysicalMemoryCallbacks(rex::thread::global_critical_region::AcquireDirect(),
+                                           0xC0000000u + physical, length, true, true);
+  if (physical >= 0x1000) {
+    g_memory->TriggerPhysicalMemoryCallbacks(rex::thread::global_critical_region::AcquireDirect(),
+                                             0xE0000000u + physical - 0x1000, length, true, true);
+  }
+}
+
 // The guest's byte order <-> DDS order (each swap undoes itself).
 void SwapEndian(uint8_t* p, size_t n, xenos::Endian e) {
   switch (e) {
@@ -360,25 +375,37 @@ bool BeforeTextureRead(const xenos::xe_gpu_texture_fetch_t& fetch) {
   // (unwatch the pages first: the GPU's copy of them goes stale and the write
   // doesn't fault on a watched page)
   for (const auto& [l, data] : levels) {
-    g_memory->TriggerPhysicalMemoryCallbacks(rex::thread::global_critical_region::AcquireDirect(),
-                                             0xA0000000u | l.address, l.span, true, true);
+    MemoryChanged(l.address, l.span);
   }
+  // (each block through the guarded copy: a page the game has made
+  // read-only, or freed meanwhile, stops the swap instead of the game)
   std::vector<uint8_t> row;
+  bool written = true;
   for (const auto& [l, data] : levels) {
+    if (!written) break;
     uint8_t* guest = Guest(l.address);
     const size_t row_bytes = size_t(l.blocks_x) * bpb;
     row.resize(row_bytes);
-    for (uint32_t y = 0; y < l.blocks_y; ++y) {
+    for (uint32_t y = 0; y < l.blocks_y && written; ++y) {
       std::memcpy(row.data(), data->data() + row_bytes * y, row_bytes);
       SwapEndian(row.data(), row_bytes, info.endianness);
-      for (uint32_t x = 0; x < l.blocks_x; ++x)
-        std::memcpy(guest + BlockOffset(info, l, x, y, log2_bpb), row.data() + size_t(x) * bpb, bpb);
+      for (uint32_t x = 0; x < l.blocks_x; ++x) {
+        if (!skate3::native_scene::GuestTryCopy(guest + BlockOffset(info, l, x, y, log2_bpb),
+                                                row.data() + size_t(x) * bpb, bpb)) {
+          written = false;
+          break;
+        }
+      }
     }
   }
   lock.unlock();
   for (const auto& [l, data] : levels) {
-    g_memory->TriggerPhysicalMemoryCallbacks(rex::thread::global_critical_region::AcquireDirect(),
-                                             0xA0000000u | l.address, l.span, true, true);
+    MemoryChanged(l.address, l.span);
+  }
+  if (!written) {
+    REXLOG_WARN("button prompts: {:016X} at {:08X} couldn't be written (the game's memory there isn't writable)",
+                id, base.address);
+    return false;
   }
   if (g_logged.fetch_add(1) < kMaxLogged) {
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();

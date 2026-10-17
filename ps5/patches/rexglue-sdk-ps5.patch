@@ -4495,7 +4495,7 @@ index 0000000..95c028d
 +}
 +#endif
 diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
-index 2f528e6..66815b6 100644
+index 2f528e6..b499162 100644
 --- a/src/core/threading_posix.cpp
 +++ b/src/core/threading_posix.cpp
 @@ -13,6 +13,7 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
@@ -4700,7 +4700,7 @@ index 2f528e6..66815b6 100644
          auto native_mutex = static_cast<pthread_mutex_t*>(handles[i]->mutex_.native_handle());
          int result = pthread_mutex_trylock(native_mutex);
          if (result == 0 || result == EOWNERDEAD) {
-@@ -404,11 +498,154 @@ class PosixConditionBase {
+@@ -404,11 +498,165 @@ class PosixConditionBase {
      return const_cast<std::condition_variable&>(cond_).native_handle();
    }
  
@@ -4829,8 +4829,24 @@ index 2f528e6..66815b6 100644
 +        return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
 +      }
 +      waiter.notified = false;  // (not registered anywhere yet)
++      // Unregistered however this scope is left (also an exception, or the
++      // thread being cancelled while it sleeps): no object may keep a
++      // pointer to this stack waiter.
++      struct Registration {
++        const std::vector<PosixConditionBase*>& handles;
++        MultiWaiter* waiter;
++        size_t count = 0;
++        ~Registration() {
++          for (size_t i = 0; i < count; ++i) {
++            std::lock_guard<std::mutex> handle_lock(handles[i]->mutex_);
++            auto& list = handles[i]->multi_waiters_;
++            list.erase(std::remove(list.begin(), list.end(), waiter), list.end());
++          }
++        }
++      } registration{handles, &waiter};
 +      for (PosixConditionBase* handle : handles) {
 +        handle->multi_waiters_.push_back(&waiter);
++        ++registration.count;
 +      }
 +      locks.clear();
 +      {
@@ -4841,11 +4857,6 @@ index 2f528e6..66815b6 100644
 +          waiter.cond.wait_until(waiter_lock, deadline);
 +        }
 +      }
-+      for (PosixConditionBase* handle : handles) {
-+        std::lock_guard<std::mutex> handle_lock(handle->mutex_);
-+        auto& list = handle->multi_waiters_;
-+        list.erase(std::remove(list.begin(), list.end(), &waiter), list.end());
-+      }
 +    }
 +  }
 +
@@ -4855,7 +4866,7 @@ index 2f528e6..66815b6 100644
  };
  
  // There really is no native POSIX handle for a single wait/signal construct
-@@ -428,7 +665,7 @@ class PosixCondition<Event> : public PosixConditionBase {
+@@ -428,7 +676,7 @@ class PosixCondition<Event> : public PosixConditionBase {
    bool Signal() override {
      auto lock = std::unique_lock<std::mutex>(mutex_);
      signal_ = true;
@@ -4864,7 +4875,7 @@ index 2f528e6..66815b6 100644
      return true;
    }
  
-@@ -465,7 +702,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
+@@ -465,7 +713,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
        *out_previous_count = count_;
      }
      count_ += release_count;
@@ -4873,7 +4884,7 @@ index 2f528e6..66815b6 100644
      return true;
    }
  
-@@ -473,7 +710,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
+@@ -473,7 +721,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
    inline bool signaled() const override { return count_ > 0; }
    inline void post_execution() override {
      count_--;
@@ -4882,7 +4893,7 @@ index 2f528e6..66815b6 100644
    }
    uint32_t count_;
    const uint32_t maximum_count_;
-@@ -497,7 +734,7 @@ class PosixCondition<Mutant> : public PosixConditionBase {
+@@ -497,7 +745,7 @@ class PosixCondition<Mutant> : public PosixConditionBase {
        --count_;
        // Free to be acquired by another thread
        if (count_ == 0) {
@@ -4891,7 +4902,7 @@ index 2f528e6..66815b6 100644
        }
        return true;
      }
-@@ -529,7 +766,7 @@ class PosixCondition<Timer> : public PosixConditionBase {
+@@ -529,7 +777,7 @@ class PosixCondition<Timer> : public PosixConditionBase {
    bool Signal() override {
      std::lock_guard<std::mutex> lock(mutex_);
      signal_ = true;
@@ -4900,7 +4911,7 @@ index 2f528e6..66815b6 100644
      return true;
    }
  
-@@ -626,10 +863,24 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -626,10 +874,24 @@ class PosixCondition<Thread> : public PosixConditionBase {
      pthread_attr_t attr;
      if (pthread_attr_init(&attr) != 0)
        return false;
@@ -4925,7 +4936,7 @@ index 2f528e6..66815b6 100644
      if (params.initial_priority != 0) {
        sched_param sched{};
        sched.sched_priority = params.initial_priority + 1;
-@@ -642,7 +893,13 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -642,7 +904,13 @@ class PosixCondition<Thread> : public PosixConditionBase {
          return false;
        }
      }
@@ -4940,7 +4951,7 @@ index 2f528e6..66815b6 100644
        pthread_attr_destroy(&attr);
        return false;
      }
-@@ -706,6 +963,8 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -706,6 +974,8 @@ class PosixCondition<Thread> : public PosixConditionBase {
        if (pthread_equal(thread_, pthread_self())) {
          pthread_setname_np(std::string(name).c_str());
        }
@@ -4949,7 +4960,7 @@ index 2f528e6..66815b6 100644
  #else
        pthread_setname_np(thread_, std::string(name).c_str());
  #endif
-@@ -733,6 +992,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -733,6 +1003,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
        return 0;
      }
      return static_cast<uint32_t>(thread_id);
@@ -4959,7 +4970,7 @@ index 2f528e6..66815b6 100644
  #else
      return static_cast<uint32_t>(thread_);
  #endif
-@@ -741,6 +1003,14 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -741,6 +1014,14 @@ class PosixCondition<Thread> : public PosixConditionBase {
    uint64_t affinity_mask() {
  #if REX_PLATFORM_MAC
      return 0;
@@ -4974,7 +4985,7 @@ index 2f528e6..66815b6 100644
  #else
      WaitStarted();
      cpu_set_t cpu_set;
-@@ -764,7 +1034,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -764,7 +1045,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
    }
  
    void set_affinity_mask(uint64_t mask) {
@@ -4983,7 +4994,7 @@ index 2f528e6..66815b6 100644
      (void)mask;
  #else
      WaitStarted();
-@@ -838,10 +1108,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -838,10 +1119,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
  
      sigval value{};
      value.sival_ptr = this;
@@ -4995,7 +5006,7 @@ index 2f528e6..66815b6 100644
      (void)value;
      int result = pthread_kill(thread_, GetSystemSignal(SignalType::kThreadUserCallback));
  #else
-@@ -943,7 +1210,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -943,7 +1221,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
  
        exit_code_ = exit_code;
        signaled_ = true;
@@ -5004,7 +5015,7 @@ index 2f528e6..66815b6 100644
      }
      if (is_current_thread) {
        pthread_exit(reinterpret_cast<void*>(exit_code));
-@@ -975,16 +1242,36 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -975,16 +1253,36 @@ class PosixCondition<Thread> : public PosixConditionBase {
  
    void* native_handle() const override { return reinterpret_cast<void*>(thread_); }
  
@@ -5041,7 +5052,7 @@ index 2f528e6..66815b6 100644
    bool signaled_;
    int exit_code_;
    State state_;             // Protected by state_mutex_
-@@ -1106,6 +1393,7 @@ PosixConditionHandle<Event>::PosixConditionHandle(bool manual_reset, bool initia
+@@ -1106,6 +1404,7 @@ PosixConditionHandle<Event>::PosixConditionHandle(bool manual_reset, bool initia
  template <>
  PosixConditionHandle<Thread>::PosixConditionHandle(pthread_t thread) : handle_(thread) {}
  
@@ -5049,7 +5060,7 @@ index 2f528e6..66815b6 100644
  WaitResult Wait(WaitHandle* wait_handle, bool is_alertable, std::chrono::milliseconds timeout) {
    auto posix_wait_handle = dynamic_cast<PosixWaitHandle*>(wait_handle);
    if (posix_wait_handle == nullptr) {
-@@ -1369,6 +1657,10 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
+@@ -1369,6 +1668,10 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
  
    current_thread_ = thread;
    current_thread_condition_ = &thread->handle_;
@@ -5060,7 +5071,7 @@ index 2f528e6..66815b6 100644
    {
      std::unique_lock<std::mutex> lock(thread->handle_.state_mutex_);
      thread->handle_.state_ = create_suspended ? State::kSuspended : State::kRunning;
-@@ -1393,7 +1685,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
+@@ -1393,7 +1696,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
      std::unique_lock<std::mutex> lock(thread->handle_.mutex_);
      thread->handle_.exit_code_ = 0;
      thread->handle_.signaled_ = true;
@@ -5069,7 +5080,7 @@ index 2f528e6..66815b6 100644
    }
  
    current_thread_ = nullptr;
-@@ -1456,6 +1748,8 @@ void Thread::Exit(int exit_code) {
+@@ -1456,6 +1759,8 @@ void Thread::Exit(int exit_code) {
  void set_current_thread_name(const std::string_view name) {
  #if REX_PLATFORM_MAC
    pthread_setname_np(std::string(name).c_str());
@@ -5232,7 +5243,7 @@ index 33a381e..c278b90 100644
    assert_true(IsDrawResolutionScaled());
    if (invalidated_by_gpu) {
 diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
-index d29ef9b..8a7e14b 100644
+index d29ef9b..136694d 100644
 --- a/src/graphics/shared_memory.cpp
 +++ b/src/graphics/shared_memory.cpp
 @@ -17,6 +17,8 @@
@@ -5253,7 +5264,7 @@ index d29ef9b..8a7e14b 100644
    active_valid_flags_.store(valid_buffer_a_.data(), std::memory_order_relaxed);
    staging_valid_flags_.store(valid_buffer_b_.data(), std::memory_order_relaxed);
    gpu_written_data_dirty_.store(false, std::memory_order_relaxed);
-@@ -690,6 +694,74 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
+@@ -690,6 +694,89 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
    return UploadRanges(upload_ranges_);
  }
  
@@ -5294,18 +5305,26 @@ index d29ef9b..8a7e14b 100644
 +        continue;
 +      }
 +      const uint32_t address = page << page_size_log2_;
-+      if (XXH3_64bits(memory_.TranslatePhysical(address), page_size) == stored) {
-+        continue;
-+      }
-+      bool still_valid = false;
 +      {
++        // (under the lock: a page still valid is still committed - freeing
++        // guest memory invalidates it in the same lock)
 +        auto global_lock = global_critical_region_.Acquire();
 +        const uint64_t* valid_flags = active_valid_flags_.load(std::memory_order_relaxed);
-+        still_valid = valid_flags && (valid_flags[block] & bit) &&
-+                      !(system_page_flags_valid_and_gpu_written_[block] & bit);
-+      }
-+      if (!still_valid) {
-+        continue;  // (a watch fired meanwhile)
++        if (!valid_flags || !(valid_flags[block] & bit) ||
++            (system_page_flags_valid_and_gpu_written_[block] & bit)) {
++          continue;  // (a watch fired meanwhile)
++        }
++        // (a page the guest made unreadable keeps its GPU copy: reading it
++        // would fault)
++        uint32_t protect = 0;
++        auto* physical_heap = memory_.GetPhysicalHeap();
++        if (!physical_heap || !physical_heap->QueryProtect(address, &protect) ||
++            !(protect & memory::kMemoryProtectRead)) {
++          continue;
++        }
++        if (XXH3_64bits(memory_.TranslatePhysical(address), page_size) == stored) {
++          continue;
++        }
 +      }
 +      page_hashes_[page] = 0;
 +      ++found;
@@ -5314,8 +5333,15 @@ index d29ef9b..8a7e14b 100644
 +        REXGPU_WARN("GPU copy of physical {:08X} +{:X} out of date, no write watch fired ({} so far)", address,
 +                    page_size, stale_pages_found_);
 +      }
++      // (each physical view keeps its own watches)
 +      memory_.TriggerPhysicalMemoryCallbacks(rex::thread::global_critical_region::AcquireDirect(),
 +                                             0xA0000000u + address, page_size, true, true);
++      memory_.TriggerPhysicalMemoryCallbacks(rex::thread::global_critical_region::AcquireDirect(),
++                                             0xC0000000u + address, page_size, true, true);
++      if (address >= 0x1000) {
++        memory_.TriggerPhysicalMemoryCallbacks(rex::thread::global_critical_region::AcquireDirect(),
++                                               0xE0000000u + address - 0x1000, page_size, true, true);
++      }
 +      MemoryInvalidationCallback(address, page_size, true);
 +    }
 +    cursor = (cursor + chunk) & (page_count - 1);
@@ -5353,17 +5379,19 @@ index 69863ce..69d8d6e 100644
    vertex_buffers_in_sync_[1] = 0;
  
 diff --git a/src/graphics/vulkan/shared_memory.cpp b/src/graphics/vulkan/shared_memory.cpp
-index 805b1f8..abc1837 100644
+index 805b1f8..98d18a1 100644
 --- a/src/graphics/vulkan/shared_memory.cpp
 +++ b/src/graphics/vulkan/shared_memory.cpp
-@@ -381,6 +381,7 @@ bool VulkanSharedMemory::UploadRanges(
+@@ -378,6 +378,9 @@ bool VulkanSharedMemory::UploadRanges(
+         break;
+       }
+       MakeRangeValid(upload_range_start << page_size_log2(), uint32_t(upload_buffer_size), false);
++      // (hashed before the copy: a write no watch sees landing in between
++      // then shows up as stale - one extra reload - instead of being missed)
++      RecordPageHashes(upload_range_start, uint32_t(upload_buffer_size >> page_size_log2()));
        std::memcpy(upload_buffer_mapping,
                    memory().TranslatePhysical(upload_range_start << page_size_log2()),
                    upload_buffer_size);
-+      RecordPageHashes(upload_range_start, uint32_t(upload_buffer_size >> page_size_log2()));
-       if (upload_buffer_previous != upload_buffer && !upload_regions_.empty()) {
-         assert_true(upload_buffer_previous != VK_NULL_HANDLE);
-         command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,
 diff --git a/src/input/CMakeLists.txt b/src/input/CMakeLists.txt
 index 698967d..baf16bd 100644
 --- a/src/input/CMakeLists.txt
