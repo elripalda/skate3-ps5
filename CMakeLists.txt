@@ -339,7 +339,8 @@ if(PS5)
         src/ps5/hub/hub_sfx.cpp
         src/ps5/hub/ps5_hub.cpp
         src/ps5/sound.cpp
-        src/ps5/ps5_button_prompts.cpp)
+        src/ps5/ps5_button_prompts.cpp
+        src/ps5/ps5_sim_probe.cpp)
     set_source_files_properties(src/ps5/hub/ps5_hub.cpp PROPERTIES
         COMPILE_DEFINITIONS "SKATE3_PS5_FONTS_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/ps5/assets/fonts\""
         OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/ps5/assets/fonts/inter-latin-400-normal.ttf")

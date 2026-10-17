@@ -1,4 +1,7 @@
 #include "skate3_native_render.h"
+#if defined(__PROSPERO__)
+#include "ps5/ps5_sim_probe.h"
+#endif
 
 #include "native/skate3_native_diag.h"
 #include "native/skate3_native_entity.h"
@@ -432,6 +435,9 @@ extern "C" REX_FUNC(sub_827FAF50) {
 
 // Guest D3D Swap: frame boundary.
 extern "C" REX_FUNC(sub_82B82E08) {
+#if defined(__PROSPERO__)
+  skate3ps5::simprobe::OnGuestSwap();
+#endif
   if (skate3::native_render::Enabled()) {
     skate3::native_render::OnFrameEnd(base);
   }
