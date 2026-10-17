@@ -1,7 +1,4 @@
 #include "skate3_native_render.h"
-#if defined(__PROSPERO__)
-#include "ps5/ps5_button_prompts.h"
-#endif
 
 #include "native/skate3_native_diag.h"
 #include "native/skate3_native_entity.h"
@@ -445,11 +442,6 @@ extern "C" REX_FUNC(sub_82B82E08) {
 // renderengine::Texture*, rw::Resource&): r4 = 64-bit asset guid,
 // r5 = texture object.
 extern "C" REX_FUNC(sub_82C9A618) {
-#if defined(__PROSPERO__)
-  // [skate3 ps5] PlayStation button pictures over the Xbox ones, before
-  // either renderer reads the texture.
-  skate3ps5::prompts::OnTextureLoaded(ctx.r5.u32);
-#endif
   if (skate3::native_render::Enabled()) {
     skate3::native_scene::OnRegisterTexture(ctx.r4.u64, ctx.r5.u32);
   }

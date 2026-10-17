@@ -124,6 +124,124 @@ index 0000000..1d95637
 +};
 +
 +}  // namespace rex::audio::ps5
+diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
+index 33b2cca..1e9a898 100644
+--- a/include/rex/graphics/pipeline/texture/cache.h
++++ b/include/rex/graphics/pipeline/texture/cache.h
+@@ -66,6 +66,13 @@ class TextureCache {
+   TextureCache& operator=(const TextureCache& texture_cache) = delete;
+   virtual ~TextureCache();
+ 
++  // [ps5 port] Called with a binding's fetch constant right before the
++  // texture it needs is loaded from guest memory. The callback may rewrite
++  // that guest memory (it must trigger the physical memory callbacks for what
++  // it changes). Set once, before any drawing.
++  using BeforeTextureReadCallback = void (*)(const xenos::xe_gpu_texture_fetch_t& fetch);
++  static void SetBeforeTextureReadCallback(BeforeTextureReadCallback callback);
++
+   // Returns whether the actual scale is not smaller than the requested one.
+   static bool GetConfigDrawResolutionScale(uint32_t& x_out, uint32_t& y_out);
+   uint32_t draw_resolution_scale_x() const { return draw_resolution_scale_x_; }
+@@ -257,15 +264,15 @@ class TextureCache {
+     static constexpr uint32_t kOutdatedBitMips = UINT32_C(1) << 1;
+     uint32_t outdated_mask() const { return outdated_mask_.load(std::memory_order_acquire); }
+ 
+-    bool base_outdated(const std::unique_lock<std::recursive_mutex>& global_lock) const {
++    bool base_outdated(const rex::thread::global_lock_t& global_lock) const {
+       return base_outdated_;
+     }
+-    bool mips_outdated(const std::unique_lock<std::recursive_mutex>& global_lock) const {
++    bool mips_outdated(const rex::thread::global_lock_t& global_lock) const {
+       return mips_outdated_;
+     }
+-    void MakeUpToDateAndWatch(const std::unique_lock<std::recursive_mutex>& global_lock);
++    void MakeUpToDateAndWatch(const rex::thread::global_lock_t& global_lock);
+ 
+-    void WatchCallback(const std::unique_lock<std::recursive_mutex>& global_lock, bool is_mip,
++    void WatchCallback(const rex::thread::global_lock_t& global_lock, bool is_mip,
+                        bool invalidated_by_gpu);
+ 
+     // For LRU caching - updates the last usage frame and moves the texture to
+@@ -616,7 +623,7 @@ class TextureCache {
+   void UpdateTexturesTotalHostMemoryUsage(uint64_t add, uint64_t subtract);
+ 
+   // Shared memory callback for texture data invalidation.
+-  static void WatchCallback(const std::unique_lock<std::recursive_mutex>& global_lock,
++  static void WatchCallback(const rex::thread::global_lock_t& global_lock,
+                             void* context, void* data, uint64_t argument, bool invalidated_by_gpu);
+ 
+   // Checks if there are any pages that contain scaled resolve data within the
+@@ -627,9 +634,9 @@ class TextureCache {
+   // Global shared memory invalidation callback for invalidating scaled resolved
+   // texture data.
+   static void ScaledResolveGlobalWatchCallbackThunk(
+-      const std::unique_lock<std::recursive_mutex>& global_lock, void* context,
++      const rex::thread::global_lock_t& global_lock, void* context,
+       uint32_t address_first, uint32_t address_last, bool invalidated_by_gpu);
+-  void ScaledResolveGlobalWatchCallback(const std::unique_lock<std::recursive_mutex>& global_lock,
++  void ScaledResolveGlobalWatchCallback(const rex::thread::global_lock_t& global_lock,
+                                         uint32_t address_first, uint32_t address_last,
+                                         bool invalidated_by_gpu);
+ 
+diff --git a/include/rex/graphics/shared_memory.h b/include/rex/graphics/shared_memory.h
+index ce4f329..b8a15b9 100644
+--- a/include/rex/graphics/shared_memory.h
++++ b/include/rex/graphics/shared_memory.h
+@@ -35,7 +35,7 @@ class SharedMemory {
+   void SetSystemPageBlocksValidWithGpuDataWritten();
+   void InvalidateAllPages();
+ 
+-  typedef void (*GlobalWatchCallback)(const std::unique_lock<std::recursive_mutex>& global_lock,
++  typedef void (*GlobalWatchCallback)(const rex::thread::global_lock_t& global_lock,
+                                       void* context, uint32_t address_first, uint32_t address_last,
+                                       bool invalidated_by_gpu);
+   typedef void* GlobalWatchHandle;
+@@ -49,7 +49,7 @@ class SharedMemory {
+   // The callback is called within the global critical region.
+   GlobalWatchHandle RegisterGlobalWatch(GlobalWatchCallback callback, void* callback_context);
+   void UnregisterGlobalWatch(GlobalWatchHandle handle);
+-  typedef void (*WatchCallback)(const std::unique_lock<std::recursive_mutex>& global_lock,
++  typedef void (*WatchCallback)(const rex::thread::global_lock_t& global_lock,
+                                 void* context, void* data, uint64_t argument,
+                                 bool invalidated_by_gpu);
+   typedef void* WatchHandle;
+@@ -100,6 +100,12 @@ class SharedMemory {
+   // regions in those pages.
+   void RangeWrittenByGpu(uint32_t start, uint32_t length);
+ 
++  // [ps5 port] Checks pages_per_frame pages of the GPU's copy of guest memory
++  // (round robin) against a hash of the guest data taken when each was
++  // uploaded: a page that changed while no write watch fired is reloaded.
++  // Returns how many were out of date.
++  uint32_t CheckStalePages(uint32_t pages_per_frame);
++
+  protected:
+   SharedMemory(memory::Memory& memory);
+   // Call in implementation-specific initialization.
+@@ -119,6 +125,9 @@ class SharedMemory {
+ 
+   uint32_t page_size_log2() const { return page_size_log2_; }
+ 
++  // [ps5 port] Hashes the guest data of pages just uploaded (CheckStalePages).
++  void RecordPageHashes(uint32_t page_first, uint32_t page_count);
++
+   uint32_t host_gpu_memory_sparse_granularity_log2() const {
+     return host_gpu_memory_sparse_granularity_log2_;
+   }
+@@ -176,6 +185,13 @@ class SharedMemory {
+   void* memory_invalidation_callback_handle_ = nullptr;
+   void* memory_data_provider_handle_ = nullptr;
+ 
++  // [ps5 port] CheckStalePages: each page's guest data hash when it was
++  // uploaded (0: not uploaded or since invalidated), the next page to check,
++  // and how many stale pages were found.
++  std::vector<uint64_t> page_hashes_;
++  uint32_t stale_check_cursor_ = 0;
++  uint64_t stale_pages_found_ = 0;
++
+   // Ranges that need to be uploaded, generated by GetRangesToUpload (a
+   // persistently allocated vector).
+   std::vector<std::pair<uint32_t, uint32_t>> upload_ranges_;
 diff --git a/include/rex/input/ps5/ps5_input_driver.h b/include/rex/input/ps5/ps5_input_driver.h
 new file mode 100644
 index 0000000..d735d1d
@@ -318,11 +436,42 @@ index 0000000..6c9fb6a
 +void NoteCriticalSectionInit(uint32_t guest, uint32_t lr);
 +uint32_t CriticalSectionInitBy(uint32_t guest);  // 0: never seen
 +}  // namespace rex::ps5diag
+diff --git a/include/rex/system/mmio_handler.h b/include/rex/system/mmio_handler.h
+index 7ae42a8..c9c3115 100644
+--- a/include/rex/system/mmio_handler.h
++++ b/include/rex/system/mmio_handler.h
+@@ -45,7 +45,7 @@ class MMIOHandler {
+ 
+   typedef uint32_t (*HostToGuestVirtual)(const void* context, const void* host_address);
+   typedef bool (*AccessViolationCallback)(
+-      std::unique_lock<std::recursive_mutex> global_lock_locked_once, void* context,
++      rex::thread::global_lock_t global_lock_locked_once, void* context,
+       void* host_address, bool is_write);
+ 
+   // access_violation_callback is called with global_critical_region locked once
 diff --git a/include/rex/system/xmemory.h b/include/rex/system/xmemory.h
-index 944e71f..5ad00e9 100644
+index 944e71f..44e83b5 100644
 --- a/include/rex/system/xmemory.h
 +++ b/include/rex/system/xmemory.h
-@@ -529,6 +529,9 @@ class Memory {
+@@ -295,7 +295,7 @@ class PhysicalHeap : public BaseHeap {
+   void EnableAccessCallbacks(uint32_t physical_address, uint32_t length,
+                              bool enable_invalidation_notifications, bool enable_data_providers);
+   // Returns true if any page in the range was watched.
+-  bool TriggerCallbacks(std::unique_lock<std::recursive_mutex> global_lock_locked_once,
++  bool TriggerCallbacks(rex::thread::global_lock_t global_lock_locked_once,
+                         uint32_t virtual_address, uint32_t length, bool is_write,
+                         bool unwatch_exact_range, bool unprotect = true);
+ 
+@@ -478,7 +478,7 @@ class Memory {
+   // TODO(Triang3l): Implement data providers - this is why locking depth of 1
+   // will be required in the future.
+   bool TriggerPhysicalMemoryCallbacks(
+-      std::unique_lock<std::recursive_mutex> global_lock_locked_once, uint32_t virtual_address,
++      rex::thread::global_lock_t global_lock_locked_once, uint32_t virtual_address,
+       uint32_t length, bool is_write, bool unwatch_exact_range, bool unprotect = true);
+ 
+   // Allocates virtual memory from the 'system' heap.
+@@ -529,15 +529,18 @@ class Memory {
    bool HasAnyFunctionTable() const;
  
   private:
@@ -332,6 +481,17 @@ index 944e71f..5ad00e9 100644
    int MapViews(uint8_t* mapping_base);
    void UnmapViews();
  
+   static uint32_t HostToGuestVirtualThunk(const void* context, const void* host_address);
+ 
+-  bool AccessViolationCallback(std::unique_lock<std::recursive_mutex> global_lock_locked_once,
++  bool AccessViolationCallback(rex::thread::global_lock_t global_lock_locked_once,
+                                void* host_address, bool is_write);
+   static bool AccessViolationCallbackThunk(
+-      std::unique_lock<std::recursive_mutex> global_lock_locked_once, void* context,
++      rex::thread::global_lock_t global_lock_locked_once, void* context,
+       void* host_address, bool is_write);
+ 
+   std::filesystem::path file_name_;
 diff --git a/include/rex/system/xthread.h b/include/rex/system/xthread.h
 index 1b2e0c1..84a828e 100644
 --- a/include/rex/system/xthread.h
@@ -373,6 +533,129 @@ index c80e029..e8d84ab 100644
    std::vector<uint8_t> stack_;
    void (*entry_)(void*) = nullptr;
    void* arg_ = nullptr;
+diff --git a/include/rex/thread/mutex.h b/include/rex/thread/mutex.h
+index 6e5755a..3b5bf84 100644
+--- a/include/rex/thread/mutex.h
++++ b/include/rex/thread/mutex.h
+@@ -13,8 +13,78 @@
+ 
+ #include <mutex>
+ 
++#if defined(__PROSPERO__)
++#include <pthread.h>
++
++#include <atomic>
++#include <cstdint>
++#endif
++
+ namespace rex::thread {
+ 
++#if defined(__PROSPERO__)
++// [ps5 port] The global critical region's lock on the PS5: a recursive spin
++// lock (owner thread + depth). The guest takes this lock constantly - every
++// interrupt-disabled stretch and lwarx/stwcx. retry loop of the recompiled
++// code enters and leaves it - and std::recursive_mutex costs the PS5's
++// kernel a round trip each time; under contention its sleeping waiters wake
++// late, and the whole game ran slow (frame rate fine, game speed off).
++// Uncontended, this is a compare-exchange; contended, it spins, then
++// yields, then naps 50 us at a time (mutex.cpp).
++class global_recursive_mutex {
++ public:
++  void lock() {
++    const uintptr_t self = Self();
++    if (owner_.load(std::memory_order_relaxed) == self) {
++      ++depth_;
++      return;
++    }
++    uintptr_t expected = 0;
++    if (!owner_.compare_exchange_strong(expected, self, std::memory_order_acquire,
++                                        std::memory_order_relaxed)) {
++      LockSlow(self);
++    }
++    depth_ = 1;
++  }
++  bool try_lock() {
++    const uintptr_t self = Self();
++    if (owner_.load(std::memory_order_relaxed) == self) {
++      ++depth_;
++      return true;
++    }
++    uintptr_t expected = 0;
++    if (!owner_.compare_exchange_strong(expected, self, std::memory_order_acquire,
++                                        std::memory_order_relaxed)) {
++      return false;
++    }
++    depth_ = 1;
++    return true;
++  }
++  void unlock() {
++    if (owner_.load(std::memory_order_relaxed) != Self()) {
++      return;  // (not this thread's: nothing to release)
++    }
++    if (--depth_ == 0) {
++      owner_.store(0, std::memory_order_release);
++    }
++  }
++  // The guest's MSR[EE] check: inside the region only on the thread holding it.
++  bool owned_by_current_thread() const { return owner_.load(std::memory_order_relaxed) == Self(); }
++
++ private:
++  static uintptr_t Self() { return reinterpret_cast<uintptr_t>(pthread_self()); }
++  void LockSlow(uintptr_t self);
++
++  std::atomic<uintptr_t> owner_{0};
++  uint32_t depth_ = 0;
++};
++using global_mutex = global_recursive_mutex;
++#else
++using global_mutex = std::recursive_mutex;
++#endif
++// A held lock of the global critical region (callbacks that run inside it get one).
++using global_lock_t = std::unique_lock<global_mutex>;
++
+ // The global critical region mutex singleton.
+ // This must guard any operation that may suspend threads or be sensitive to
+ // being suspended such as global table locks and such.
+@@ -55,30 +125,30 @@ namespace rex::thread {
+ // };
+ class global_critical_region {
+  public:
+-  static std::recursive_mutex& mutex();
++  static global_mutex& mutex();
+ 
+   // Acquires a lock on the global critical section.
+   // Use this when keeping an instance is not possible. Otherwise, prefer
+   // to keep an instance of global_critical_region near the members requiring
+   // it to keep things readable.
+-  static std::unique_lock<std::recursive_mutex> AcquireDirect() {
+-    return std::unique_lock<std::recursive_mutex>(mutex());
++  static std::unique_lock<global_mutex> AcquireDirect() {
++    return std::unique_lock<global_mutex>(mutex());
+   }
+ 
+   // Acquires a lock on the global critical section.
+-  inline std::unique_lock<std::recursive_mutex> Acquire() {
+-    return std::unique_lock<std::recursive_mutex>(mutex());
++  inline std::unique_lock<global_mutex> Acquire() {
++    return std::unique_lock<global_mutex>(mutex());
+   }
+ 
+   // Acquires a deferred lock on the global critical section.
+-  inline std::unique_lock<std::recursive_mutex> AcquireDeferred() {
+-    return std::unique_lock<std::recursive_mutex>(mutex(), std::defer_lock);
++  inline std::unique_lock<global_mutex> AcquireDeferred() {
++    return std::unique_lock<global_mutex>(mutex(), std::defer_lock);
+   }
+ 
+   // Tries to acquire a lock on the glboal critical section.
+   // Check owns_lock() to see if the lock was successfully acquired.
+-  inline std::unique_lock<std::recursive_mutex> TryAcquire() {
+-    return std::unique_lock<std::recursive_mutex>(mutex(), std::try_to_lock);
++  inline std::unique_lock<global_mutex> TryAcquire() {
++    return std::unique_lock<global_mutex>(mutex(), std::try_to_lock);
+   }
+ };
+ 
 diff --git a/include/rex/ui/pad_dialog_style.h b/include/rex/ui/pad_dialog_style.h
 new file mode 100644
 index 0000000..8f4f184
@@ -3251,7 +3534,7 @@ index 0000000..3a63d8d
 ++#define CONFIG_LIBZMQ_PROTOCOL 0
 ++#endif /* FFMPEG_CONFIG_H */
 diff --git a/resources/templates/codegen/init_h.inja b/resources/templates/codegen/init_h.inja
-index 5586034..76ff64b 100644
+index 5586034..1afa9e9 100644
 --- a/resources/templates/codegen/init_h.inja
 +++ b/resources/templates/codegen/init_h.inja
 @@ -111,7 +111,7 @@ extern PPCFuncMapping {{ project }}_PPCFuncMappings[];
@@ -3263,6 +3546,28 @@ index 5586034..76ff64b 100644
  #define REX_PHYS_HOST_OFFSET(addr) (((u32)(addr) >= 0xE0000000u) ? 0x1000u : 0u)
  #else
  #define REX_PHYS_HOST_OFFSET(addr) 0u
+@@ -302,11 +302,21 @@ inline std::atomic<i32>& ppc_global_lock_count_() {
+   return count;
+ }
+ 
++#if REX_PLATFORM_PS5
++// [ps5 port] Without taking the lock: the region is "entered" only on the
++// thread that holds it (another thread holding it: interrupts are on here).
++#define REX_CHECK_GLOBAL_LOCK()                                                \
++  ((rex::thread::global_critical_region::mutex().owned_by_current_thread() && \
++    ppc_global_lock_count_().load())                                           \
++       ? u64(0)                                                                \
++       : u64(0x8000))
++#else
+ #define REX_CHECK_GLOBAL_LOCK()                                        \
+   ([&]() -> u64 {                                                      \
+     auto lock_ = rex::thread::global_critical_region::AcquireDirect(); \
+     return ppc_global_lock_count_().load() ? 0 : 0x8000;               \
+   }())
++#endif
+ 
+ #define REX_ENTER_GLOBAL_LOCK()                          \
+   do {                                                   \
 diff --git a/resources/templates/test/ppc_config_h.inja b/resources/templates/test/ppc_config_h.inja
 index 9a42506..8f76938 100644
 --- a/resources/templates/test/ppc_config_h.inja
@@ -3820,6 +4125,54 @@ index 34a51a9..c39ab68 100644
    if (ret < 0) {
      return kFileMappingHandleInvalid;
    }
+diff --git a/src/core/mutex.cpp b/src/core/mutex.cpp
+index d639924..7f325c0 100644
+--- a/src/core/mutex.cpp
++++ b/src/core/mutex.cpp
+@@ -11,11 +11,40 @@
+ 
+ #include <rex/thread/mutex.h>
+ 
++#if defined(__PROSPERO__)
++#include <sched.h>
++#include <time.h>
++#endif
++
+ namespace rex::thread {
+ 
+-std::recursive_mutex& global_critical_region::mutex() {
+-  static std::recursive_mutex global_mutex;
+-  return global_mutex;
++global_mutex& global_critical_region::mutex() {
++  static global_mutex the_mutex;
++  return the_mutex;
++}
++
++#if defined(__PROSPERO__)
++// Contended: spin (the holder is usually out within a few microseconds),
++// then yield, then nap 50 us at a time.
++void global_recursive_mutex::LockSlow(uintptr_t self) {
++  for (uint32_t tries = 0;; ++tries) {
++    if (owner_.load(std::memory_order_relaxed) == 0) {
++      uintptr_t expected = 0;
++      if (owner_.compare_exchange_strong(expected, self, std::memory_order_acquire,
++                                         std::memory_order_relaxed)) {
++        return;
++      }
++    }
++    if (tries < 2000) {
++      __builtin_ia32_pause();
++    } else if (tries < 2200) {
++      sched_yield();
++    } else {
++      const timespec nap{0, 50000};
++      nanosleep(&nap, nullptr);
++    }
++  }
+ }
++#endif
+ 
+ }  // namespace rex::thread
 diff --git a/src/core/ps5_diag.cpp b/src/core/ps5_diag.cpp
 new file mode 100644
 index 0000000..7d718ff
@@ -4142,10 +4495,18 @@ index 0000000..95c028d
 +}
 +#endif
 diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
-index 2f528e6..46f053e 100644
+index 2f528e6..66815b6 100644
 --- a/src/core/threading_posix.cpp
 +++ b/src/core/threading_posix.cpp
-@@ -23,17 +23,21 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
+@@ -13,6 +13,7 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
+ 
+ #include <signal.h>
+ 
++#include <algorithm>
+ #include <atomic>
+ #include <array>
+ #include <cerrno>
+@@ -23,17 +24,21 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
  #include <memory>
  
  #include <pthread.h>
@@ -4168,7 +4529,7 @@ index 2f528e6..46f053e 100644
  #include <rex/chrono/chrono_steady_cast.h>
  #include <rex/logging.h>
  #include <rex/thread/timer_queue.h>
-@@ -47,7 +51,79 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
+@@ -47,7 +52,79 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
  #include <rex/string/util.h>
  #endif
  
@@ -4249,7 +4610,7 @@ index 2f528e6..46f053e 100644
  // SIGEV_THREAD_ID in timer_create(...) is a Linux extension
  #define REX_HAS_SIGEV_THREAD_ID 1
  #ifdef __GLIBC__
-@@ -60,6 +136,13 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
+@@ -60,6 +137,13 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
  #define REX_HAS_SIGEV_THREAD_ID 0
  #endif
  
@@ -4263,7 +4624,7 @@ index 2f528e6..46f053e 100644
  namespace rex::thread {
  
  #if REX_PLATFORM_ANDROID
-@@ -113,7 +196,7 @@ enum class SignalType {
+@@ -113,7 +197,7 @@ enum class SignalType {
  };
  
  int GetSystemSignal(SignalType num) {
@@ -4272,7 +4633,7 @@ index 2f528e6..46f053e 100644
    switch (num) {
      case SignalType::kThreadSuspend:
        return SIGUSR1;
-@@ -131,7 +214,7 @@ int GetSystemSignal(SignalType num) {
+@@ -131,7 +215,7 @@ int GetSystemSignal(SignalType num) {
  }
  
  SignalType GetSystemSignalType(int num) {
@@ -4281,7 +4642,7 @@ index 2f528e6..46f053e 100644
    switch (num) {
      case SIGUSR1:
        return SignalType::kThreadSuspend;
-@@ -176,6 +259,8 @@ uint32_t current_thread_system_id() {
+@@ -176,6 +260,8 @@ uint32_t current_thread_system_id() {
    uint64_t thread_id;
    pthread_threadid_np(nullptr, &thread_id);
    return static_cast<uint32_t>(thread_id);
@@ -4290,7 +4651,7 @@ index 2f528e6..46f053e 100644
  #else
    return static_cast<uint32_t>(syscall(SYS_gettid));
  #endif
-@@ -249,7 +334,7 @@ bool SetTlsValue(TlsHandle handle, uintptr_t value) {
+@@ -249,7 +335,7 @@ bool SetTlsValue(TlsHandle handle, uintptr_t value) {
  class PosixConditionBase {
   public:
    PosixConditionBase() {
@@ -4299,7 +4660,7 @@ index 2f528e6..46f053e 100644
      // Use robust mutexes so waits can recover if owner thread terminates.
      pthread_mutexattr_t attr;
      if (pthread_mutexattr_init(&attr) == 0) {
-@@ -269,7 +354,7 @@ class PosixConditionBase {
+@@ -269,7 +355,7 @@ class PosixConditionBase {
    WaitResult Wait(std::chrono::milliseconds timeout) {
      bool executed;
      auto predicate = [this] { return this->signaled(); };
@@ -4308,7 +4669,29 @@ index 2f528e6..46f053e 100644
      auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());
      int lock_result = pthread_mutex_lock(native_mutex);
      if (lock_result == EOWNERDEAD) {
-@@ -323,7 +408,7 @@ class PosixConditionBase {
+@@ -280,6 +366,11 @@ class PosixConditionBase {
+     std::unique_lock<std::mutex> lock(mutex_, std::adopt_lock);
+ #else
+     std::unique_lock<std::mutex> lock(mutex_);
++#endif
++#if REX_PLATFORM_PS5
++    if (!predicate() && timeout.count() > 0) {
++      SpinForSignal(lock);
++    }
+ #endif
+     if (predicate()) {
+       executed = true;
+@@ -314,6 +405,9 @@ class PosixConditionBase {
+                         ? std::chrono::steady_clock::time_point::max()
+                         : start_time + timeout;
+ 
++#if REX_PLATFORM_PS5
++    return WaitMultiplePs5(handles, wait_all, end_time);
++#endif
+     while (true) {
+       size_t first_signaled = std::numeric_limits<size_t>::max();
+       bool condition_met = false;
+@@ -323,7 +417,7 @@ class PosixConditionBase {
        locks.reserve(handles.size());
  
        for (size_t i = 0; i < handles.size(); ++i) {
@@ -4317,7 +4700,207 @@ index 2f528e6..46f053e 100644
          auto native_mutex = static_cast<pthread_mutex_t*>(handles[i]->mutex_.native_handle());
          int result = pthread_mutex_trylock(native_mutex);
          if (result == 0 || result == EOWNERDEAD) {
-@@ -626,10 +711,24 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -404,11 +498,154 @@ class PosixConditionBase {
+     return const_cast<std::condition_variable&>(cond_).native_handle();
+   }
+ 
++#if REX_PLATFORM_PS5
++  // [ps5 port] Wakes everything waiting on this object. Call with mutex_
++  // held, whenever the object may have become signaled.
++  void NotifySignal() {
++    cond_.notify_all();
++    signal_generation_.fetch_add(1, std::memory_order_release);
++    for (MultiWaiter* waiter : multi_waiters_) {
++      std::lock_guard<std::mutex> waiter_lock(waiter->mutex);
++      waiter->notified = true;
++      waiter->cond.notify_one();
++    }
++  }
++#else
++  void NotifySignal() { cond_.notify_all(); }
++#endif
++
+  protected:
+   inline virtual bool signaled() const = 0;
+   inline virtual void post_execution() = 0;
+   std::condition_variable cond_;
+   std::mutex mutex_;
++
++#if REX_PLATFORM_PS5
++ private:
++  // A thread in WaitMultiple, woken by any of its objects' signals.
++  struct MultiWaiter {
++    std::mutex mutex;
++    std::condition_variable cond;
++    bool notified = false;
++  };
++
++  // [ps5 port] Before a wait sleeps, it watches the object's signal count for
++  // ps5_wait_spin_us without holding its lock (so the thread that signals it
++  // isn't held up): the game hands work between its threads constantly, and a
++  // thread woken from sleep starts running a few microseconds later where one
++  // that's still watching sees the signal right away. Returns with the lock
++  // held.
++  void SpinForSignal(std::unique_lock<std::mutex>& lock) {
++    const int32_t spin_us = REXCVAR_GET(ps5_wait_spin_us);
++    if (spin_us <= 0) {
++      return;
++    }
++    uint32_t generation = signal_generation_.load(std::memory_order_relaxed);
++    lock.unlock();
++    const auto end = std::chrono::steady_clock::now() + std::chrono::microseconds(spin_us);
++    do {
++      for (int i = 0; i < 8; ++i) {
++        __builtin_ia32_pause();
++      }
++      const uint32_t now_generation = signal_generation_.load(std::memory_order_acquire);
++      if (now_generation != generation) {
++        lock.lock();
++        if (signaled()) {
++          return;
++        }
++        lock.unlock();
++        generation = now_generation;
++      }
++    } while (std::chrono::steady_clock::now() < end);
++    lock.lock();
++  }
++
++  // [ps5 port] WaitMultiple without polling: the waiter registers with every
++  // object and sleeps until one of them is signaled (rechecking at least
++  // every 50 ms).
++  static std::pair<WaitResult, size_t> WaitMultiplePs5(
++      const std::vector<PosixConditionBase*>& handles, bool wait_all,
++      std::chrono::steady_clock::time_point end_time) {
++    MultiWaiter waiter;
++    std::vector<std::unique_lock<std::mutex>> locks;
++    locks.reserve(handles.size());
++    while (true) {
++      locks.clear();
++      bool all_locked = true;
++      for (PosixConditionBase* handle : handles) {
++        locks.emplace_back(handle->mutex_, std::try_to_lock);
++        if (!locks.back().owns_lock()) {
++          all_locked = false;
++          break;
++        }
++      }
++      if (!all_locked) {
++        locks.clear();
++        std::this_thread::yield();
++        continue;
++      }
++
++      size_t first_signaled = std::numeric_limits<size_t>::max();
++      bool condition_met = false;
++      if (wait_all) {
++        condition_met = true;
++        for (size_t i = 0; i < handles.size(); ++i) {
++          if (!handles[i]->signaled()) {
++            condition_met = false;
++            break;
++          }
++          if (first_signaled == std::numeric_limits<size_t>::max()) {
++            first_signaled = i;
++          }
++        }
++      } else {
++        for (size_t i = 0; i < handles.size(); ++i) {
++          if (handles[i]->signaled()) {
++            first_signaled = i;
++            condition_met = true;
++            break;
++          }
++        }
++      }
++      if (condition_met) {
++        if (wait_all) {
++          for (PosixConditionBase* handle : handles) {
++            handle->post_execution();
++          }
++        } else {
++          handles[first_signaled]->post_execution();
++        }
++        return std::make_pair(WaitResult::kSuccess, first_signaled);
++      }
++
++      const auto now = std::chrono::steady_clock::now();
++      if (now >= end_time) {
++        return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
++      }
++      waiter.notified = false;  // (not registered anywhere yet)
++      for (PosixConditionBase* handle : handles) {
++        handle->multi_waiters_.push_back(&waiter);
++      }
++      locks.clear();
++      {
++        const auto deadline =
++            end_time - now > std::chrono::milliseconds(50) ? now + std::chrono::milliseconds(50) : end_time;
++        std::unique_lock<std::mutex> waiter_lock(waiter.mutex);
++        while (!waiter.notified && std::chrono::steady_clock::now() < deadline) {
++          waiter.cond.wait_until(waiter_lock, deadline);
++        }
++      }
++      for (PosixConditionBase* handle : handles) {
++        std::lock_guard<std::mutex> handle_lock(handle->mutex_);
++        auto& list = handle->multi_waiters_;
++        list.erase(std::remove(list.begin(), list.end(), &waiter), list.end());
++      }
++    }
++  }
++
++  std::vector<MultiWaiter*> multi_waiters_;    // Protected by mutex_
++  std::atomic<uint32_t> signal_generation_{0};  // Bumped on every signal
++#endif
+ };
+ 
+ // There really is no native POSIX handle for a single wait/signal construct
+@@ -428,7 +665,7 @@ class PosixCondition<Event> : public PosixConditionBase {
+   bool Signal() override {
+     auto lock = std::unique_lock<std::mutex>(mutex_);
+     signal_ = true;
+-    cond_.notify_all();
++    NotifySignal();
+     return true;
+   }
+ 
+@@ -465,7 +702,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
+       *out_previous_count = count_;
+     }
+     count_ += release_count;
+-    cond_.notify_all();
++    NotifySignal();
+     return true;
+   }
+ 
+@@ -473,7 +710,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
+   inline bool signaled() const override { return count_ > 0; }
+   inline void post_execution() override {
+     count_--;
+-    cond_.notify_all();
++    NotifySignal();
+   }
+   uint32_t count_;
+   const uint32_t maximum_count_;
+@@ -497,7 +734,7 @@ class PosixCondition<Mutant> : public PosixConditionBase {
+       --count_;
+       // Free to be acquired by another thread
+       if (count_ == 0) {
+-        cond_.notify_all();
++        NotifySignal();
+       }
+       return true;
+     }
+@@ -529,7 +766,7 @@ class PosixCondition<Timer> : public PosixConditionBase {
+   bool Signal() override {
+     std::lock_guard<std::mutex> lock(mutex_);
+     signal_ = true;
+-    cond_.notify_all();
++    NotifySignal();
+     return true;
+   }
+ 
+@@ -626,10 +863,24 @@ class PosixCondition<Thread> : public PosixConditionBase {
      pthread_attr_t attr;
      if (pthread_attr_init(&attr) != 0)
        return false;
@@ -4342,7 +4925,7 @@ index 2f528e6..46f053e 100644
      if (params.initial_priority != 0) {
        sched_param sched{};
        sched.sched_priority = params.initial_priority + 1;
-@@ -642,7 +741,13 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -642,7 +893,13 @@ class PosixCondition<Thread> : public PosixConditionBase {
          return false;
        }
      }
@@ -4357,7 +4940,7 @@ index 2f528e6..46f053e 100644
        pthread_attr_destroy(&attr);
        return false;
      }
-@@ -706,6 +811,8 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -706,6 +963,8 @@ class PosixCondition<Thread> : public PosixConditionBase {
        if (pthread_equal(thread_, pthread_self())) {
          pthread_setname_np(std::string(name).c_str());
        }
@@ -4366,7 +4949,7 @@ index 2f528e6..46f053e 100644
  #else
        pthread_setname_np(thread_, std::string(name).c_str());
  #endif
-@@ -733,6 +840,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -733,6 +992,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
        return 0;
      }
      return static_cast<uint32_t>(thread_id);
@@ -4376,7 +4959,7 @@ index 2f528e6..46f053e 100644
  #else
      return static_cast<uint32_t>(thread_);
  #endif
-@@ -741,6 +851,14 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -741,6 +1003,14 @@ class PosixCondition<Thread> : public PosixConditionBase {
    uint64_t affinity_mask() {
  #if REX_PLATFORM_MAC
      return 0;
@@ -4391,7 +4974,7 @@ index 2f528e6..46f053e 100644
  #else
      WaitStarted();
      cpu_set_t cpu_set;
-@@ -764,7 +882,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -764,7 +1034,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
    }
  
    void set_affinity_mask(uint64_t mask) {
@@ -4400,7 +4983,7 @@ index 2f528e6..46f053e 100644
      (void)mask;
  #else
      WaitStarted();
-@@ -838,10 +956,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -838,10 +1108,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
  
      sigval value{};
      value.sival_ptr = this;
@@ -4412,7 +4995,16 @@ index 2f528e6..46f053e 100644
      (void)value;
      int result = pthread_kill(thread_, GetSystemSignal(SignalType::kThreadUserCallback));
  #else
-@@ -975,16 +1090,36 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -943,7 +1210,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
+ 
+       exit_code_ = exit_code;
+       signaled_ = true;
+-      cond_.notify_all();
++      NotifySignal();
+     }
+     if (is_current_thread) {
+       pthread_exit(reinterpret_cast<void*>(exit_code));
+@@ -975,16 +1242,36 @@ class PosixCondition<Thread> : public PosixConditionBase {
  
    void* native_handle() const override { return reinterpret_cast<void*>(thread_); }
  
@@ -4449,79 +5041,15 @@ index 2f528e6..46f053e 100644
    bool signaled_;
    int exit_code_;
    State state_;             // Protected by state_mutex_
-@@ -1106,11 +1241,50 @@ PosixConditionHandle<Event>::PosixConditionHandle(bool manual_reset, bool initia
+@@ -1106,6 +1393,7 @@ PosixConditionHandle<Event>::PosixConditionHandle(bool manual_reset, bool initia
  template <>
  PosixConditionHandle<Thread>::PosixConditionHandle(pthread_t thread) : handle_(thread) {}
  
-+#if REX_PLATFORM_PS5
-+// [ps5 port] Before a wait sleeps, it watches the object for a short while:
-+// the game hands work between its threads constantly, and a thread woken
-+// from sleep starts running a few microseconds later (~4.4 us median on the
-+// PS5) where one that's still watching sees the signal in ~1 us.
-+template <typename Poll>
-+WaitResult Ps5SpinWait(std::chrono::milliseconds timeout, Poll&& poll) {
-+  const int32_t spin_us = REXCVAR_GET(ps5_wait_spin_us);
-+  if (spin_us <= 0 || timeout.count() == 0) {
-+    return WaitResult::kTimeout;
-+  }
-+  const auto end = std::chrono::steady_clock::now() + std::chrono::microseconds(spin_us);
-+  do {
-+    for (int i = 0; i < 64; ++i) {
-+      __builtin_ia32_pause();
-+    }
-+    const WaitResult result = poll();
-+    if (result != WaitResult::kTimeout) {
-+      return result;
-+    }
-+  } while (std::chrono::steady_clock::now() < end);
-+  return WaitResult::kTimeout;
-+}
-+#endif
 +
  WaitResult Wait(WaitHandle* wait_handle, bool is_alertable, std::chrono::milliseconds timeout) {
    auto posix_wait_handle = dynamic_cast<PosixWaitHandle*>(wait_handle);
    if (posix_wait_handle == nullptr) {
-     return WaitResult::kFailed;
-   }
-+#if REX_PLATFORM_PS5
-+  {
-+    auto& condition = posix_wait_handle->condition();
-+    if (condition.Wait(std::chrono::milliseconds(0)) == WaitResult::kSuccess) {
-+      return WaitResult::kSuccess;
-+    }
-+    const WaitResult spun = Ps5SpinWait(timeout, [&condition] {
-+      return condition.Wait(std::chrono::milliseconds(0));
-+    });
-+    if (spun != WaitResult::kTimeout) {
-+      return spun;
-+    }
-+  }
-+#endif
-   if (!is_alertable) {
-     return posix_wait_handle->condition().Wait(timeout);
-   }
-@@ -1176,6 +1350,20 @@ std::pair<WaitResult, size_t> WaitMultiple(WaitHandle* wait_handles[], size_t wa
-     }
-     conditions.push_back(&handle->condition());
-   }
-+#if REX_PLATFORM_PS5
-+  {
-+    size_t index = 0;
-+    const WaitResult spun = Ps5SpinWait(timeout, [&] {
-+      auto result = PosixConditionBase::WaitMultiple(std::vector<PosixConditionBase*>(conditions),
-+                                                     wait_all, std::chrono::milliseconds(0));
-+      index = result.second;
-+      return result.first;
-+    });
-+    if (spun != WaitResult::kTimeout) {
-+      return std::make_pair(spun, index);
-+    }
-+  }
-+#endif
-   if (!is_alertable) {
-     return PosixConditionBase::WaitMultiple(std::move(conditions), wait_all, timeout);
-   }
-@@ -1369,6 +1557,10 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
+@@ -1369,6 +1657,10 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
  
    current_thread_ = thread;
    current_thread_condition_ = &thread->handle_;
@@ -4532,7 +5060,16 @@ index 2f528e6..46f053e 100644
    {
      std::unique_lock<std::mutex> lock(thread->handle_.state_mutex_);
      thread->handle_.state_ = create_suspended ? State::kSuspended : State::kRunning;
-@@ -1456,6 +1648,8 @@ void Thread::Exit(int exit_code) {
+@@ -1393,7 +1685,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
+     std::unique_lock<std::mutex> lock(thread->handle_.mutex_);
+     thread->handle_.exit_code_ = 0;
+     thread->handle_.signaled_ = true;
+-    thread->handle_.cond_.notify_all();
++    thread->handle_.NotifySignal();
+   }
+ 
+   current_thread_ = nullptr;
+@@ -1456,6 +1748,8 @@ void Thread::Exit(int exit_code) {
  void set_current_thread_name(const std::string_view name) {
  #if REX_PLATFORM_MAC
    pthread_setname_np(std::string(name).c_str());
@@ -4616,6 +5153,217 @@ index 20a31f1..4f25f59 100644
    // Increment vblank counter (so the game sees us making progress).
    if (command_processor_) {
      command_processor_->increment_counter();
+diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
+index 33a381e..c278b90 100644
+--- a/src/graphics/pipeline/texture/cache.cpp
++++ b/src/graphics/pipeline/texture/cache.cpp
+@@ -232,6 +232,14 @@ const TextureCache::LoadShaderInfo TextureCache::load_shader_info_[kLoadShaderCo
+     {4, 4, 4, 3},
+ };
+ 
++namespace {
++TextureCache::BeforeTextureReadCallback g_before_texture_read = nullptr;
++}  // namespace
++
++void TextureCache::SetBeforeTextureReadCallback(BeforeTextureReadCallback callback) {
++  g_before_texture_read = callback;
++}
++
+ TextureCache::TextureCache(const RegisterFile& register_file, SharedMemory& shared_memory,
+                            uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y)
+     : register_file_(register_file),
+@@ -625,6 +633,13 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+       }
+       binding.texture_signed = nullptr;
+     }
++    if (g_before_texture_read) {
++      Texture* loading = load_unsigned_data ? binding.texture
++                                            : (load_signed_data ? binding.texture_signed : nullptr);
++      if (loading && loading->outdated_mask()) {
++        g_before_texture_read(fetch);
++      }
++    }
+     if (load_unsigned_data) {
+       queue_pending_texture_load(binding.texture);
+     }
+@@ -1210,7 +1225,7 @@ TextureCache::Texture::~Texture() {
+ }
+ 
+ void TextureCache::Texture::MakeUpToDateAndWatch(
+-    const std::unique_lock<std::recursive_mutex>& global_lock) {
++    const rex::thread::global_lock_t& global_lock) {
+   SharedMemory& shared_memory = texture_cache().shared_memory();
+   if (base_outdated_) {
+     assert_not_zero(GetGuestBaseSize());
+@@ -1256,7 +1271,7 @@ void TextureCache::Texture::MarkAsUsed() {
+ }
+ 
+ void TextureCache::Texture::WatchCallback(
+-    [[maybe_unused]] const std::unique_lock<std::recursive_mutex>& global_lock, bool is_mip,
++    [[maybe_unused]] const rex::thread::global_lock_t& global_lock, bool is_mip,
+     bool invalidated_by_gpu) {
+   texture_cache().DebugLogTeamProfileBackgroundTextureCandidate(
+       invalidated_by_gpu ? (is_mip ? "invalidate-gpu-mips" : "invalidate-gpu-base")
+@@ -1275,7 +1290,7 @@ void TextureCache::Texture::WatchCallback(
+   }
+ }
+ 
+-void TextureCache::WatchCallback(const std::unique_lock<std::recursive_mutex>& global_lock,
++void TextureCache::WatchCallback(const rex::thread::global_lock_t& global_lock,
+                                  void* context, void* data, uint64_t argument,
+                                  bool invalidated_by_gpu) {
+   Texture& texture = *static_cast<Texture*>(context);
+@@ -1630,7 +1645,7 @@ bool TextureCache::IsRangeFullyScaledResolved(uint32_t start_unscaled, uint32_t
+ }
+ 
+ void TextureCache::ScaledResolveGlobalWatchCallbackThunk(
+-    const std::unique_lock<std::recursive_mutex>& global_lock, void* context,
++    const rex::thread::global_lock_t& global_lock, void* context,
+     uint32_t address_first, uint32_t address_last, bool invalidated_by_gpu) {
+   TextureCache* texture_cache = reinterpret_cast<TextureCache*>(context);
+   texture_cache->ScaledResolveGlobalWatchCallback(global_lock, address_first, address_last,
+@@ -1638,7 +1653,7 @@ void TextureCache::ScaledResolveGlobalWatchCallbackThunk(
+ }
+ 
+ void TextureCache::ScaledResolveGlobalWatchCallback(
+-    const std::unique_lock<std::recursive_mutex>& global_lock, uint32_t address_first,
++    const rex::thread::global_lock_t& global_lock, uint32_t address_first,
+     uint32_t address_last, bool invalidated_by_gpu) {
+   assert_true(IsDrawResolutionScaled());
+   if (invalidated_by_gpu) {
+diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
+index d29ef9b..8a7e14b 100644
+--- a/src/graphics/shared_memory.cpp
++++ b/src/graphics/shared_memory.cpp
+@@ -17,6 +17,8 @@
+ #include <rex/bit.h>
+ #include <rex/dbg.h>
+ #include <rex/graphics/shared_memory.h>
++#include <rex/hash.h>
++#include <rex/logging.h>
+ #include <rex/math.h>
+ #include <rex/memory.h>
+ 
+@@ -35,6 +37,8 @@ void SharedMemory::InitializeCommon() {
+   valid_buffer_a_.assign(num_system_page_flags_, 0);
+   valid_buffer_b_.assign(num_system_page_flags_, 0);
+   system_page_flags_valid_and_gpu_written_.assign(num_system_page_flags_, 0);
++  page_hashes_.assign(kBufferSize >> page_size_log2_, 0);
++  stale_check_cursor_ = 0;
+   active_valid_flags_.store(valid_buffer_a_.data(), std::memory_order_relaxed);
+   staging_valid_flags_.store(valid_buffer_b_.data(), std::memory_order_relaxed);
+   gpu_written_data_dirty_.store(false, std::memory_order_relaxed);
+@@ -690,6 +694,74 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
+   return UploadRanges(upload_ranges_);
+ }
+ 
++void SharedMemory::RecordPageHashes(uint32_t page_first, uint32_t page_count) {
++  const size_t page_size = size_t(1) << page_size_log2_;
++  for (uint32_t page = page_first; page_count && page < page_hashes_.size(); ++page, --page_count) {
++    const uint64_t hash =
++        XXH3_64bits(memory_.TranslatePhysical((page << page_size_log2_) & (kBufferSize - 1)), page_size);
++    page_hashes_[page] = hash ? hash : 1;
++  }
++}
++
++uint32_t SharedMemory::CheckStalePages(uint32_t pages_per_frame) {
++  const uint32_t page_count = kBufferSize >> page_size_log2_;
++  if (!pages_per_frame || page_hashes_.size() != page_count) {
++    return 0;
++  }
++  const uint32_t page_size = uint32_t(1) << page_size_log2_;
++  uint32_t cursor = stale_check_cursor_ & (page_count - 1);
++  uint32_t remaining = std::min(pages_per_frame, page_count);
++  uint32_t found = 0;
++  while (remaining) {
++    // (one 64-page block of flags at a time)
++    const uint32_t chunk = std::min({(cursor & ~uint32_t(63)) + 64 - cursor, page_count - cursor, remaining});
++    const uint32_t block = cursor >> 6;
++    uint64_t candidates = 0;
++    {
++      auto global_lock = global_critical_region_.Acquire();
++      const uint64_t* valid_flags = active_valid_flags_.load(std::memory_order_relaxed);
++      if (valid_flags) {
++        candidates = valid_flags[block] & ~system_page_flags_valid_and_gpu_written_[block];
++      }
++    }
++    for (uint32_t page = cursor; page < cursor + chunk; ++page) {
++      const uint64_t stored = page_hashes_[page];
++      const uint64_t bit = uint64_t(1) << (page & 63);
++      if (!stored || !(candidates & bit)) {
++        continue;
++      }
++      const uint32_t address = page << page_size_log2_;
++      if (XXH3_64bits(memory_.TranslatePhysical(address), page_size) == stored) {
++        continue;
++      }
++      bool still_valid = false;
++      {
++        auto global_lock = global_critical_region_.Acquire();
++        const uint64_t* valid_flags = active_valid_flags_.load(std::memory_order_relaxed);
++        still_valid = valid_flags && (valid_flags[block] & bit) &&
++                      !(system_page_flags_valid_and_gpu_written_[block] & bit);
++      }
++      if (!still_valid) {
++        continue;  // (a watch fired meanwhile)
++      }
++      page_hashes_[page] = 0;
++      ++found;
++      ++stale_pages_found_;
++      if (stale_pages_found_ <= 64 || !(stale_pages_found_ & (stale_pages_found_ - 1))) {
++        REXGPU_WARN("GPU copy of physical {:08X} +{:X} out of date, no write watch fired ({} so far)", address,
++                    page_size, stale_pages_found_);
++      }
++      memory_.TriggerPhysicalMemoryCallbacks(rex::thread::global_critical_region::AcquireDirect(),
++                                             0xA0000000u + address, page_size, true, true);
++      MemoryInvalidationCallback(address, page_size, true);
++    }
++    cursor = (cursor + chunk) & (page_count - 1);
++    remaining -= chunk;
++  }
++  stale_check_cursor_ = cursor;
++  return found;
++}
++
+ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallbackThunk(
+     void* context_ptr, uint32_t physical_address_start, uint32_t length, bool exact_range) {
+   return reinterpret_cast<SharedMemory*>(context_ptr)
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 69863ce..69d8d6e 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -61,6 +61,9 @@
+ #include <rex/ui/vulkan/util.h>
+ 
+ // Legacy backend compatibility aliases for shared readback controls.
++REXCVAR_DEFINE_INT32(gpu_stale_check_pages_per_frame, 128, "GPU",
++                     "[ps5 port] Pages of the GPU's copy of guest memory checked each frame for writes no "
++                     "write watch saw (reloaded when found; 0: off)");
+ REXCVAR_DEFINE_BOOL(vulkan_readback_resolve, false, "GPU/Vulkan",
+                     "Read render-to-texture results on the CPU")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -2594,6 +2597,9 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
+ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                                        uint32_t frontbuffer_height) {
+   SCOPE_profile_cpu_f("gpu");
++  if (shared_memory_ && REXCVAR_GET(gpu_stale_check_pages_per_frame) > 0) {
++    shared_memory_->CheckStalePages(uint32_t(REXCVAR_GET(gpu_stale_check_pages_per_frame)));
++  }
+   vertex_buffers_in_sync_[0] = 0;
+   vertex_buffers_in_sync_[1] = 0;
+ 
+diff --git a/src/graphics/vulkan/shared_memory.cpp b/src/graphics/vulkan/shared_memory.cpp
+index 805b1f8..abc1837 100644
+--- a/src/graphics/vulkan/shared_memory.cpp
++++ b/src/graphics/vulkan/shared_memory.cpp
+@@ -381,6 +381,7 @@ bool VulkanSharedMemory::UploadRanges(
+       std::memcpy(upload_buffer_mapping,
+                   memory().TranslatePhysical(upload_range_start << page_size_log2()),
+                   upload_buffer_size);
++      RecordPageHashes(upload_range_start, uint32_t(upload_buffer_size >> page_size_log2()));
+       if (upload_buffer_previous != upload_buffer && !upload_regions_.empty()) {
+         assert_true(upload_buffer_previous != VK_NULL_HANDLE);
+         command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,
 diff --git a/src/input/CMakeLists.txt b/src/input/CMakeLists.txt
 index 698967d..baf16bd 100644
 --- a/src/input/CMakeLists.txt
@@ -5671,7 +6419,7 @@ index f08e31e..5eaf722 100644
 +}  // namespace rex::ui
 +#endif
 diff --git a/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp b/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp
-index 8b862fc..cd9e3ab 100644
+index 8b862fc..080a576 100644
 --- a/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp
 +++ b/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp
 @@ -12,6 +12,12 @@
@@ -5692,9 +6440,9 @@ index 8b862fc..cd9e3ab 100644
  #include <rex/thread/atomic.h>
  
 +#if REX_PLATFORM_PS5
-+REXCVAR_DEFINE_INT32(ps5_cs_spin_us, 20, "PS5",
-+                     "Critical sections spin this long (us) for the lock before waiting for it "
-+                     "(0 = only the game's own spin count)");
++REXCVAR_DEFINE_INT32(ps5_cs_spin_us, 40, "PS5",
++                     "Contended critical sections spin this long (us) for the owner to leave before "
++                     "they wait (0 = never spin)");
 +#endif
 +
  namespace rex::kernel::xboxkrnl {
@@ -5739,7 +6487,7 @@ index 8b862fc..cd9e3ab 100644
 +  if (const int32_t spin_us = REXCVAR_GET(ps5_cs_spin_us); spin_us > 0) {
 +    const auto end = std::chrono::steady_clock::now() + std::chrono::microseconds(spin_us);
 +    do {
-+      for (int i = 0; i < 32; ++i) {
++      for (int i = 0; i < 8; ++i) {
 +        __builtin_ia32_pause();
 +      }
 +      if (*reinterpret_cast<volatile int32_t*>(&cs->lock_count) == -1 &&
@@ -5880,7 +6628,7 @@ index 2b93005..f94a72a 100644
    auto p = reinterpret_cast<const uint8_t*>(rip);
    DecodedLoadStore decoded_load_store;
 diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
-index 0c542aa..09c8d64 100644
+index 0c542aa..1337894 100644
 --- a/src/system/xmemory.cpp
 +++ b/src/system/xmemory.cpp
 @@ -9,10 +9,20 @@
@@ -6090,6 +6838,32 @@ index 0c542aa..09c8d64 100644
  int Memory::MapViews(uint8_t* mapping_base) {
    assert_true(rex::countof(map_info) == rex::countof(views_.all_views));
  
+@@ -531,7 +698,7 @@ runtime::MMIORange* Memory::LookupVirtualMappedRange(uint32_t virtual_address) {
+   return mmio_handler_->LookupRange(virtual_address);
+ }
+ 
+-bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> global_lock_locked_once,
++bool Memory::AccessViolationCallback(rex::thread::global_lock_t global_lock_locked_once,
+                                      void* host_address, bool is_write) {
+   // Access via physical_membase_ is special, when need to bypass everything
+   // (for instance, for a data provider to actually write the data) so only
+@@ -634,14 +801,14 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
+ }
+ 
+ bool Memory::AccessViolationCallbackThunk(
+-    std::unique_lock<std::recursive_mutex> global_lock_locked_once, void* context,
++    rex::thread::global_lock_t global_lock_locked_once, void* context,
+     void* host_address, bool is_write) {
+   return reinterpret_cast<memory::Memory*>(context)->AccessViolationCallback(
+       std::move(global_lock_locked_once), host_address, is_write);
+ }
+ 
+ bool Memory::TriggerPhysicalMemoryCallbacks(
+-    std::unique_lock<std::recursive_mutex> global_lock_locked_once, uint32_t virtual_address,
++    rex::thread::global_lock_t global_lock_locked_once, uint32_t virtual_address,
+     uint32_t length, bool is_write, bool unwatch_exact_range, bool unprotect) {
+   BaseHeap* heap = LookupHeap(virtual_address);
+   if (!heap) {
 @@ -1330,6 +1497,29 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t
    if (start_page_number == UINT_MAX || end_page_number == UINT_MAX) {
      // Out of memory.
@@ -6181,6 +6955,15 @@ index 0c542aa..09c8d64 100644
  
    // Release from host not needed as mapping reserves the range for us.
    // TODO(benvanik): protect with NOACCESS?
+@@ -1962,7 +2199,7 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
+   }
+ }
+ 
+-bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> global_lock_locked_once,
++bool PhysicalHeap::TriggerCallbacks(rex::thread::global_lock_t global_lock_locked_once,
+                                     uint32_t virtual_address, uint32_t length, bool is_write,
+                                     bool unwatch_exact_range, bool unprotect) {
+   // TODO(Triang3l): Support read watches.
 diff --git a/src/system/xobject.cpp b/src/system/xobject.cpp
 index b328244..bd29449 100644
 --- a/src/system/xobject.cpp

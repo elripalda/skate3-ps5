@@ -697,7 +697,7 @@ std::optional<rex::PathConfig> Skate3BaseApp::OnFinalizePaths(
     rex::ui::SaveSimpleSettingsConfig(settings_path);
     skate3ps5::hub::Show(
         imgui_drawer(), immediate_drawer(), app, game, std::move(config), std::string(SKATE3_PS5_VERSION),
-        [app, game_root, tu_package, resume = std::move(resume), runtime_paths]() mutable {
+        [game_root, tu_package, resume = std::move(resume), runtime_paths]() mutable {
           if (!skate3::IsTitleUpdateInstalled(game_root) && std::filesystem::is_regular_file(tu_package)) {
             std::string error;
             if (skate3::StageTitleUpdateFromFile(tu_package, game_root, error)) {
@@ -706,7 +706,6 @@ std::optional<rex::PathConfig> Skate3BaseApp::OnFinalizePaths(
               REXLOG_ERROR("PS5: Title Update 3 couldn't be set up: {}", error);
             }
           }
-          skate3ps5::prompts::Init(app);
           REXLOG_INFO("PS5 hub: START GAME");
           resume(std::move(runtime_paths));
         });
@@ -902,6 +901,10 @@ void Skate3BaseApp::OnPostSetup() {
 #endif
 
   auto* dispatcher = runtime()->function_dispatcher();
+#if defined(__PROSPERO__)
+  // PlayStation button prompts: hooks both renderers' texture reads.
+  skate3ps5::prompts::Install(runtime()->memory());
+#endif
   skate3::native_render::Install();
   skate3::demo_path::InstallHooks(dispatcher);
   // User-facing intro-movie skip (independent of the demo path): the movie

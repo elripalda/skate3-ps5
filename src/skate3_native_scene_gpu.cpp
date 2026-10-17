@@ -58,6 +58,9 @@
 #endif
 #include "skate3_native_scene_state.h"
 #include "skate3_native_scene_gpu_internal.h"
+#if defined(__PROSPERO__)
+#include "ps5/ps5_button_prompts.h"
+#endif
 
 // Cvars defined in skate3_native_scene.cpp (and SDK cvars re-declared there).
 REXCVAR_DECLARE(bool, async_shader_compilation);
@@ -1604,6 +1607,11 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
   fetch.dword_3 = words[3];
   fetch.dword_4 = words[4];
   fetch.dword_5 = words[5];
+#if defined(__PROSPERO__)
+  // [skate3 ps5] A PlayStation button picture over the Xbox one before it's
+  // read (the emulated renderer does the same from its texture cache).
+  skate3ps5::prompts::BeforeTextureRead(fetch);
+#endif
   if (fetch.type != xenos::FetchConstantType::kTexture || fetch.base_address == 0) {
     return false;
   }
